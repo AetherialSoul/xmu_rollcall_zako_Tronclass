@@ -40,3 +40,6 @@ runtime.log
 # Keep these local unless you have verified redistribution permission/license terms.
 integrations/iqa_helper/
 integrations/course_helper/
+
+# Large local media assets
+assets/*.mp4

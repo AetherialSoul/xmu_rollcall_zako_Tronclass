@@ -3177,7 +3177,7 @@ class ZakoApp(ctk.CTk):
             new_text = "🔁 自动签到" if self._auto_mode else "📋 手动签到"
             auto_btn.configure(text=new_text)
             auto_btn.configure(fg_color=ACCENT if self._auto_mode else SURFACE2)
-            status_text = f"切换到{'自动' if self._auto_mode else '手动'}模式，下次启动监听生效"
+            status_text = f"切换到{'自动' if self._auto_mode else '手动'}模式，运行中的监听将立即生效"
             if self._monitor_status_label:
                 self._monitor_status_label.configure(text=status_text)
             self._log(f"[monitor] {'自动' if self._auto_mode else '手动'}签到模式")
