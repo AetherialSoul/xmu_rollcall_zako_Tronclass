@@ -15,8 +15,8 @@ These projects are not vendored in this repository. Users can install them local
 
 | Project | URL | Installed Path | What This Toolkit Uses | License / Packaging Treatment |
 | --- | --- | --- | --- | --- |
-| `XMUIQAHelper` | https://github.com/vintcessun/XMUIQAHelper | `integrations/iqa_helper` | Automatic evaluation flow. The toolkit copies a local launcher shim and passes `XMU_CAS_PROFILE_DIR`, `XMU_USERNAME`, and `XMU_PASSWORD` when launching its `start.bat`. | Optional local install only. GitHub API reported GPL-3.0 during local review, so source is not bundled into this MIT repository. |
-| `XMUCourseHelper` | https://github.com/wegret/XMUCourseHelper | `integrations/course_helper` | Course-selection helper, polling interval options, captcha configuration model, and local token cache behavior. | Optional local install only. No GitHub license file was detected during local review, so source is not bundled. |
+| `XMUIQAHelper` | https://github.com/vintcessun/XMUIQAHelper | `integrations/iqa_helper` | Automatic evaluation flow. `setup_full.bat` / `setup_optional_integrations.bat` clone it locally, install declared dependencies, copy a local launcher shim, and pass `XMU_CAS_PROFILE_DIR`, `XMU_USERNAME`, and `XMU_PASSWORD` when launching its `start.bat`. | Optional local install only. GitHub API reported GPL-3.0 during local review, so source is not bundled into this MIT repository. |
+| `XMUCourseHelper` | https://github.com/wegret/XMUCourseHelper | `integrations/course_helper` | Course-selection helper, polling interval options, captcha configuration model, and local token cache behavior. Setup scripts clone it locally, install its requirements, and generate local `config/user.yaml`. | Optional local install only. No GitHub license file was detected during local review, so source is not bundled. |
 
 ## Referenced But Not Vendored
 

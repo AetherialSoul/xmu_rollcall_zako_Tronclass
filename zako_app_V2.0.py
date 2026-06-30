@@ -347,14 +347,14 @@ def load_settings_values(log=print):
         "completion_bynjdm": str(yaml_get_section_scalar(score_text, "completion_query", "bynjdm", "-") or "-"),
         "completion_sclbdm": str(yaml_get_section_scalar(score_text, "completion_query", "sclbdm", "04") or "04"),
         "course_campus": str(yaml_get_root_scalar(course_text, "campus", "6") or "6"),
-        "course_auto_add_enable": as_bool(yaml_get_root_scalar(course_text, "auto_add_enable", True), True),
+        "course_auto_add_enable": as_bool(yaml_get_root_scalar(course_text, "auto_add_enable", False), False),
         "course_check_interval": settings_int(yaml_get_root_scalar(course_text, "check_interval", 15), 15, 5),
         "course_fast_check_interval": settings_int(yaml_get_root_scalar(course_text, "fast_check_interval", 5), 5, 5),
         "course_fast_monitor_seconds": settings_int(yaml_get_root_scalar(course_text, "fast_monitor_seconds", 120), 120, 0),
         "course_add_retry_count": settings_int(yaml_get_root_scalar(course_text, "add_retry_count", 5), 5, 0),
         "course_add_retry_interval": settings_float(yaml_get_root_scalar(course_text, "add_retry_interval", 1.0), 1.0, 0),
         "course_interval_jitter": settings_float(yaml_get_root_scalar(course_text, "interval_jitter", 0.10), 0.10, 0, 0.3),
-        "captcha_type": str(yaml_get_section_scalar(course_text, "captcha", "type", "llm") or "llm").strip().lower(),
+        "captcha_type": str(yaml_get_section_scalar(course_text, "captcha", "type", "manual") or "manual").strip().lower(),
         "captcha_base_url": str(yaml_get_section_scalar(course_text, "captcha", "base_url", "") or ""),
         "captcha_api_key": str(yaml_get_section_scalar(course_text, "captcha", "api_key", "") or ""),
         "captcha_model": str(yaml_get_section_scalar(course_text, "captcha", "model", "") or ""),
@@ -410,7 +410,7 @@ def save_settings_values(values, log=print):
         text = set_yaml_root_scalar(text, "add_retry_count", settings_int(values.get("course_add_retry_count"), 5, 0))
         text = set_yaml_root_scalar(text, "add_retry_interval", settings_float(values.get("course_add_retry_interval"), 1.0, 0))
         text = set_yaml_root_scalar(text, "interval_jitter", settings_float(values.get("course_interval_jitter"), 0.10, 0, 0.3))
-        text = set_yaml_section_scalar(text, "captcha", "type", str(values.get("captcha_type") or "llm"))
+        text = set_yaml_section_scalar(text, "captcha", "type", str(values.get("captcha_type") or "manual"))
         text = set_yaml_section_scalar(text, "captcha", "base_url", str(values.get("captcha_base_url") or ""))
         text = set_yaml_section_scalar(text, "captcha", "api_key", str(values.get("captcha_api_key") or ""))
         text = set_yaml_section_scalar(text, "captcha", "model", str(values.get("captcha_model") or ""))

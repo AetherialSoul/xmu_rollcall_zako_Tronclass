@@ -29,22 +29,31 @@
 
 - Windows 10/11
 - Python 3.11+
-- Git for Windows
+- Git for Windows 可选；没有 Git 时，可选集成脚本会尝试下载 GitHub ZIP
 - Microsoft Edge 或 Google Chrome；也可以使用 Playwright 自带 Chromium
 
 ```powershell
 git clone https://github.com/AetherialSoul/xmu_rollcall_zako_Tronclass.git
 cd xmu_rollcall_zako_Tronclass
-.\setup.bat
+.\setup_full.bat
 .\run.bat
 ```
 
-`setup.bat` 会完成：
+`setup_full.bat` 会完成核心安装和完整按钮功能安装：
 
 - 创建 `.venv`
 - 安装主项目依赖
 - 安装 Playwright Chromium
 - 复制 `account.example.json` 为本地 `account.local.json`
+- 拉取自动评教和选课助手上游项目到本机 `integrations/`
+- 安装可选集成依赖，并生成本地启动器 / 配置模板
+
+只需要教学平台、签到和成绩查询时，也可以只运行：
+
+```powershell
+.\setup.bat
+.\run.bat
+```
 
 首次运行后，到 `设置` 页面填写统一认证账号密码，或手动编辑：
 
@@ -57,7 +66,7 @@ cd xmu_rollcall_zako_Tronclass
 
 ## 安装完整按钮功能
 
-如果需要 `自动评教` 和 `选课` 两个按钮也能直接启动，运行：
+如果之前只跑过 `setup.bat`，后来需要 `自动评教` 和 `选课` 两个按钮也能直接启动，运行：
 
 ```powershell
 .\setup_optional_integrations.bat
@@ -70,17 +79,27 @@ cd xmu_rollcall_zako_Tronclass
 - 为选课助手生成 `config/user.example.yaml` 和本地 `config/user.yaml`。
 - 把可选依赖安装进主项目 `.venv`。
 
+可选集成优先使用 `git clone` / `git pull`；网络不稳定导致 Git 失败时，会尝试下载 GitHub ZIP 压缩包作为兜底。
+
 安装完成后重新打开 `run.bat`，再点击 `自动评教` 或 `选课`。
 
 选课验证码默认为手动输入；如果要使用多模态 LLM 自动识别验证码，在 `设置` 页面填写验证码接口地址、模型和 API Key。
+
+安装后可以运行检查脚本确认本机完整功能文件和依赖齐全：
+
+```powershell
+.\check_install.bat
+```
 
 ## 目录结构
 
 ```text
 .
 ├─ setup.bat                         # 初始化主项目环境
+├─ setup_full.bat                    # 初始化主项目 + 拉取可选完整功能
 ├─ run.bat                           # 启动 GUI
 ├─ setup_optional_integrations.bat    # 拉取自动评教/选课可选集成
+├─ check_install.bat                  # 检查完整安装是否齐全
 ├─ tools/                             # 可选集成启动器和配置模板
 ├─ zako_app_V2.0.py                   # 主 GUI：统一启动器 + 教学平台工具
 ├─ zako_get_rollcall.py               # CLI 版教学平台签到查询
@@ -138,6 +157,7 @@ cd xmu_rollcall_zako_Tronclass
 
 ```powershell
 .\.venv\Scripts\python.exe -m py_compile .\zako_app_V2.0.py .\zako_get_rollcall.py
+.\check_install.bat /nopause
 ```
 
 提交前建议确认不会上传个人数据：
