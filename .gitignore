@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Browser/login state
+.zako_browser_profile/
+browser_profile/
+**/Default/Cookies
+**/Default/Network/Cookies
+
+# Local credentials and runtime configs
+account.local.json
+custom_radar_locations.json
+config.yaml
+scores.yaml
+Cookie.txt
+integrations/score_query/config.yaml
+integrations/score_query/scores.yaml
+integrations/score_query/Cookie.txt
+integrations/score_query/browser_profile/
+integrations/score_query/score_query.lock
+integrations/course_helper/config/user.yaml
+
+# Token/cache files
+cache/XMUClient.json
+integrations/course_helper/cache/XMUClient.json
+
+# Generated/debug output
+lnt_reports/
+runtime.log
+*.log
+
+# Local-only launchers/backups
+*.bak
+*.bak_*
+*.lnk
+
+# Optional third-party source trees.
+# Keep these local unless you have verified redistribution permission/license terms.
+integrations/iqa_helper/
+integrations/course_helper/

@@ -1,0 +1,30 @@
+info:
+  username:       # 用户名（你的学号）
+  password:       # 密码；浏览器模式默认不使用，只有 browser.auto_login_once=true 时才会在网页中自动提交一次
+browser:
+  auto_login_once: false # true: 每次程序启动最多在浏览器登录页自动提交一次密码；失败后只等待手动登录
+  start_url:       # 可选：手动指定浏览器打开的教务页面；留空时 completion 模式自动打开培养方案详情页
+legacy_password_login: false # true: 允许 app.py 旧版后台密码登录入口；不推荐
+interval: 10      # 检查间隔（分钟）
+terms:            # 学期（格式：2025-2026学年 第二学期 或 2025-2026-2），留空则为查询所有
+  # - 2025-2026学年 第二学期
+courses:          # 课程（可以为课程号也可以是课程名），留空则为查询所有
+  # - 微积分I-2
+notify: system    # 通知方式（system: 系统通知，email: 邮件通知，both: 全部使用，留空则不通知）
+email:            # 邮件通知配置
+  host:           # SMTP 服务器地址，如 smtp.163.com
+  port:           # SMTP 服务器端口，如 465
+  username:       # SMTP 用户名
+  password:       # SMTP 授权码，不是邮箱登录密码
+  use_ssl: false  # 是否使用 SSL
+  receiver:       # 收件人（留空则默认与 username 相同）
+show_score: true  # 是否在推送中显示成绩
+score_query:
+  source: completion # completion: 学业完成进度接口；standard: 原成绩查询接口；auto: 优先 completion，无结果时回退 standard
+completion_query: # 学业完成进度接口参数：进入培养方案详情页后，从浏览器地址栏 URL 中复制
+  pyfadm:         # 培养方案代码，对应 URL 里的 PYFADM=...
+  pyfamc:         # 培养方案名称，对应 URL 里的 PYFAMC=...
+  pcdm: '-'      # 对应 URL 里的 PCDM，一般保持 '-'
+  ymjs: '0'      # 对应 URL 里的 YMJS，一般保持 '0'
+  bynjdm: '-'    # 毕业年级代码，一般保持 '-'
+  sclbdm: '04'   # 生成类别代码，一般保持 '04'
