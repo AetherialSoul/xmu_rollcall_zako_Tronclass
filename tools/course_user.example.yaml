@@ -1,0 +1,13 @@
+username: "<student_id>"
+password: "<password>"
+campus: "6"
+auto_add_enable: false
+check_interval: 15
+fast_check_interval: 5
+fast_monitor_seconds: 120
+add_retry_count: 5
+add_retry_interval: 1.0
+interval_jitter: 0.10
+
+captcha:
+  type: "manual"
