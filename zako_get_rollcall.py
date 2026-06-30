@@ -2,8 +2,10 @@ import asyncio
 import re
 import requests
 from playwright.async_api import async_playwright
+from pathlib import Path
 
 BASE_URL = "https://lnt.xmu.edu.cn"
+LOGIN_STATE_DIR = Path(__file__).resolve().parent / ".zako_browser_profile"
 
 HEADERS_BASE = {
     "accept": "application/json, text/plain, */*",
@@ -35,9 +37,29 @@ async def login_and_get_cookie():
     print("❤正在打开浏览器喵❤，连接厦大CAS畅课登录系统喵❤")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
+        LOGIN_STATE_DIR.mkdir(exist_ok=True)
+        print(f"🔐 登录状态会保存在：{LOGIN_STATE_DIR}")
+
+        context = None
+        for channel in ("msedge", "chrome"):
+            try:
+                context = await p.chromium.launch_persistent_context(
+                    str(LOGIN_STATE_DIR),
+                    headless=False,
+                    channel=channel,
+                )
+                print(f"✅ 成功连接到本地 [{channel}] 喵！")
+                break
+            except Exception:
+                print(f"⚠️ [{channel}] 启动失败喵，准备尝试下一个...")
+
+        if context is None:
+            context = await p.chromium.launch_persistent_context(
+                str(LOGIN_STATE_DIR),
+                headless=False,
+            )
+
+        page = context.pages[0] if context.pages else await context.new_page()
 
         student_id = None
 
@@ -111,7 +133,7 @@ async def login_and_get_cookie():
         lnt_cookies = [c for c in cookies if "lnt.xmu.edu.cn" in c.get("domain", "")]
         cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in lnt_cookies])
 
-        await browser.close()
+        await context.close()
 
         if not student_id:
             print("❌ 经过所有手段均未能获取学生ID。呜喵")

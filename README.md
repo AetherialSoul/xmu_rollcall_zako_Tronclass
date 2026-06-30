@@ -1,140 +1,128 @@
-# xmu_rollcall_zako_Tronclass
-厦门大学XMU畅课数字签到直接获取数字签到码，这是一个为 XMUer 打造的、基于 爬虫思路 开发的畅课（Tronclass）签到码自动化查询工具。主要是解放天天被你要签到码的同学喵！使用我们的zako_rocall就靠自己查正在进行的数字签到喵！
-# 🐾 zako_rollcall：厦大畅课签到码查询神器
+# XMU Study Toolkit
 
-> **声明：** 本项目仅供技术交流与学习，请勿用于非法用途。请尊重教学秩序，文明签到喵！
->
-> **环境要求：**用户电脑上**一定**要有`edge`或者`chrome`浏览器喵！
+厦门大学 CAS 本机学习工具整合版。项目把原来的畅课 / 教学平台签到工具、成绩查询入口和若干可选校园工具收拢到一个 CustomTkinter 桌面启动器中，目标是减少重复登录、重复打开脚本和手动改配置的成本。
 
-> ### 📦 开发环境
->
-> - **语言**: Python 3.11+
-> - **框架**: CustomTkinter (GUI), Playwright (Automation), Requests (API)
-> - **打包工具**: PyInstaller
+> 本项目仅用于本人账号、本机环境下的学习与自动化研究。请遵守学校教学管理要求、课程要求和平台使用规范；不要把账号、Cookie、浏览器配置、成绩缓存或验证码服务 Key 上传到公开仓库。
 
-这是一个为 XMUer 打造的、基于 Python 开发的畅课（Tronclass）签到码自动化查询工具。主要是解放天天被你要签到码的同学喵！使用我们的zako_rocall就靠自己查正在进行的数字签到喵！
+## 功能概览
 
-## ✨ 项目起因与动机 (Motivation)
+- 统一主页：启动后提供 `成绩查询`、`教学平台`、`自动评教`、`选课`、`设置` 五个入口。
+- 教学平台：使用 Playwright 打开 XMU CAS / TronClass，登录态保存在本机 `.zako_browser_profile/`，返回主页再进入时会优先复用当前会话。
+- 签到工具：支持课程列表、数字签到码查询、签到提醒、自动监听和确认后提交。
+- 二维码签到：内置本地扫码页，浏览器前端调用摄像头识别二维码，也支持手动粘贴二维码内容后提交。
+- 雷达点名：提供校区 / 教学楼预设、失败诊断、坐标微调和自定义位置库，便于现场确认后调整提交。
+- 学习通 / 畅课工具：可查询课程考试 / 作业列表、试题内容、答案 / 解析接口返回，以及课堂互动列表和互动题目。
+- 成绩查询：集成 `XMUScoreAutoQuery` / 培养方案完成度查询思路，支持标准成绩接口、培养方案完成度接口和自动优先模式。
+- 个性化设置：在 GUI 内配置统一账号、登录方式、成绩查询方式、通知方式、教务链接参数、默认雷达位置、选课间隔和验证码参数。
+- 可选外部工具：自动评教和选课入口保留为本地集成目录，公开仓库不直接分发授权不明确的第三方源码。
 
-在日常校园生活里，如果你想翘课，每次查询签到码都要经历“打扰作为你眼线的同学今天的签到码是什么 -> 朝思暮想同学的快点回复”的漫长路径，同时还不能确定消息传递是否及时，以及有些课就是没有认识的同学喵！这对于一个追求效率的 **zako** 来说太不优雅了喵！
+## 目录结构
 
-- **痛点**：CAS 登录验证、在网站中每人独一份的student学生ID不好获得、手动查码速度慢（主要还是现实中的古法签到获取不方便）。
-- **目标**：实现“登录后就能：全课覆盖、光速查码”，并提供极简**傻瓜式**的图形交互界面。
+```text
+.
+├─ zako_app_V2.0.py              # 主 GUI：统一启动器 + 教学平台工具
+├─ zako_get_rollcall.py          # CLI 版教学平台签到查询
+├─ account.example.json          # 本地账号配置模板
+├─ integrations/
+│  └─ score_query/               # 成绩查询集成，保留原 MIT License
+├─ THIRD_PARTY_PROJECTS.md       # 参考项目与许可证边界
+└─ INTEGRATION.md                # 本地集成目录和配置说明
+```
 
+运行时会生成的个人文件已加入 `.gitignore`，包括 `account.local.json`、`.zako_browser_profile/`、`custom_radar_locations.json`、成绩查询配置、浏览器缓存、Cookie、日志和报告文件。
 
+## 安装
 
-### 1. 为什么要做这个？
+环境建议：
 
-在厦大畅课（Tronclass）的日常使用中，学生端往往只能看到“正在签到”的提示，而无法直接查看到签到码（需要任课老师提供，再就是等同学“线人提供”）。
+- Windows 10/11
+- Python 3.11+
+- Microsoft Edge 或 Google Chrome；也可以安装 Playwright 自带 Chromium
 
-### 2. 核心漏洞/动机：越权访问风险
+```powershell
+git clone https://github.com/AetherialSoul/xmu_rollcall_zako_Tronclass.git
+cd xmu_rollcall_zako_Tronclass
 
-在分析畅课 API 时发现，其**教师端的部分签到查询接口对学生身份的权限审查并不严密**。 理论上，只要拥有一个合法的登录 Session（Cookie），并获取到该学生的内部 `student_id`，并结合课程```course_id```就可以构造出某一次签到记录的 API 请求，获得这次签到的```rollcall_id```就可以构造出就可以通过构造特定的 API 请求，直接访问到原本属于教师端展示的“签到详情”界面，从而提前或直接获取 **4 位数字签到码**。
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\.venv\Scripts\pip.exe install -r requirements.txt
+.\.venv\Scripts\python.exe -m playwright install chromium
 
-### 3. 手动 vs 自动化：技术进化的路径
+copy account.example.json account.local.json
+notepad account.local.json
+```
 
-如果我们没有这个工具，手动操作需要以下步骤：
+`account.local.json` 示例：
 
-1. **第一步（获取身份）**：登录网页端，打开 F12 开发者工具，在 Network 选项卡中不断刷新，寻找包含 `student/xxxx/rollcalls` 的请求，手动记录下那串 `xxxx` 数字（即 Student ID）。（这个一般只在进入某门课的“签到记录”界面才有包含，一般获取不到，所以我们采用主发送请求再拦截的方法，见下）
-2. **第二步（获取课程）**：查找并记录下目标课程的内部 `course_id`。
-3. **第三步（构造请求）**：手动拼接 API 地址（如 `/api/course/{course_id}/student/{student_id}/rollcalls`），在 Header 中填入复杂的 Cookie，最后在返回的 JSON 瀑布流中寻找 `number_code` 字段。
+```json
+{
+  "username": "your_student_id",
+  "password": "your_password"
+}
+```
 
-**本项目通过技术平移，将上述枯燥的过程彻底自动化：**
+启动：
 
-- **自动化拦截**：利用 **Playwright** 挂载“灵魂拦截器”，在用户正常登录 CAS 的过程中，通过正则匹配网络流量，瞬时自动提取 Student ID。
-- **技术平移**：将手动抓包得到的 Header 逻辑完整平移到后台 `Requests` 异步任务中，实现秒级响应。
+```powershell
+.\.venv\Scripts\python.exe .\zako_app_V2.0.py
+```
 
-## 🛠️ 技术路径 (Technical Path)
+首次使用教学平台或成绩查询时，按弹出的浏览器完成 XMU CAS 登录。后续会尽量复用本机登录态。
 
-本项目经历了几次重大的技术迭代，最终形成了一套“自动化拦截 + 异步 API 驱动 + 工业级 GUI”的方案：
+## 成绩查询配置
 
-1. **核心引擎 (Crawler & Interceptor)**:
-   - **Playwright**: 利用现代浏览器自动化工具模拟登录，并作为“灵魂监听器”挂载全局请求拦截。
-   - **正则拦截**: 动态截获 `/student/(\d+)/rollcalls` 流量，秒级获取用户真实 Student ID 。  
-2. **业务逻辑 (API Logic)**:
-   - **动态校准**: 自动访问 `current-semester-info` 接口，智能识别当前学年与学期 ID，拒绝硬编码 。  
-   - **高效通信**: 纯 `Requests` 驱动的后台通信，100% 还原原始请求 Payload 和 Referer 验证，保证响应速度与原生一致。
-3. **图形界面 (GUI Architecture)**:
-   - **CustomTkinter**: 舍弃不稳定的框架，拥抱基于 Tkinter 增强的工业级现代 UI 。  
-   - **多线程并发 (Threading)**: 将 Playwright 浏览器操作与 API 查码逻辑塞进后台线程，前端主线程负责 UI 渲染与状态反馈（如沙漏 ⏳ 动画），彻底解决界面卡死问题。
-   - **输出重定向 (Stdout Hijack)**: 编写 `StdoutRedirector` 黑科技，实时将 Python 底层的 `print` 输出同步到 GUI 的“赛博控制台”中。
-4. **分发部署 (Packaging)**:
-   - **Conda 环境管理**: 建立隔离的无菌开发环境。
-   - **PyInstaller**: 深度捆绑 Chromium 内核与 Python 解释器，实现单文件 `.exe` 发布。
+成绩查询代码位于 `integrations/score_query/`，配置由主程序设置页写入：
 
+- `integrations/score_query/config.yaml`
+- `integrations/score_query/scores.yaml`
+- `integrations/score_query/browser_profile/`
 
+这些文件都只保存在本机，不会被 Git 跟踪。设置页中可以配置：
 
-## 🛠️ 代码工程实现 (How it works)
+- 查询来源：标准成绩接口、培养方案完成度、自动优先完成度。
+- 检查间隔、通知方式、是否在通知中显示具体分数。
+- 教务系统入口链接 `browser.start_url`。
+- 培养方案完成度接口参数，例如 `PYFADM`、`PYFAMC`、`PCDM`、`YMJS`、`BYNJDM`、`SCLBDM`。
 
-本项目代码逻辑严格遵循工程化拆解，主要函数功能如下：
+如果教务系统页面或参数变化，可以先在浏览器里打开对应页面，再把当前链接和接口参数填入设置页。
 
-1. **`login_and_get_cookie()` —— 身份初始化**
-   - 启动 Chromium 浏览器（.exe文件的思路是访问用户本机的浏览器，有线访问顺序是edge -> chrome，所以用户使用我的.exe**一定要保证电脑上有edge浏览器或者chrome浏览器喵！**），引导用户完成 XMU CAS 统一认证登录。
-   - **核心提速**：使用 `wait_until="commit"` 策略，在页面尚未完全渲染完成时即开始扫描网络包。
-   - **灵魂拦截**：通过 `page.on("request")` 监听器，利用正则表达式 `r'/student/(\d+)/rollcalls'` 捕获关键 Student ID。
-2. **`get_current_semester_info()` —— 环境校准**
-   - 自动请求系统配置，动态获取当前学期 (`semester_id`) 和学年 (`academic_year_id`)，确保脚本在任何学期都能免维护运行。
-3. **`get_courses()` —— 资产清单**
-   - 拉取用户当前学期所有正在进行的课程，构建课程 ID 与名称的映射表。
-4. **`get_latest_rollcall_id()` —— 追踪目标**
-   - 针对特定课程，查询其最新的签到活动 ID。
-5. **`get_number_code()` —— 最终截获**
-   - **核心功能**：访问签到详情接口，提取 `number_code`（签到码）和 `status`（签到状态）。
+## 可选本地集成
 
+公开仓库默认只包含本项目代码和可确认 MIT 授权的成绩查询集成。以下工具在 GUI 中保留入口，但源码不随本仓库分发；如果你确认有使用和再分发权限，可以自行放到对应目录：
 
+- 自动评教：`integrations/iqa_helper/start.bat`
+- 选课助手：`integrations/course_helper/client.py`
 
-## 核心功能 (Features)
+主程序会在入口缺失时给出提示，不会影响教学平台和成绩查询功能。
 
-### 🐍 CLI 纯净版 (`zako_get_rollcall.py`)
+## 参考项目
 
-- **无限循环模式**：只要不按回车，Cookie 在有效期内可无限次切换课程查询。
-- **轻量极速**：适合在各类终端环境下快速部署与运行。
+本整合版参考或集成过以下项目的思路，详细边界见 [THIRD_PARTY_PROJECTS.md](THIRD_PARTY_PROJECTS.md)：
 
-### 🎨 GUI 豪华版 (`zako_app_V2.0.py`)
+- `hankeke303/XMUScoreAutoQuery`：成绩查询与通知基础。
+- `AetherialSoul/XMUScoreCompletionQuery`：培养方案完成度成绩来源。
+- `vintcessun/XMUIQAHelper`：自动评教入口与 CAS 登录态复用思路。
+- `wegret/XMUCourseHelper`：选课助手入口、间隔和验证码配置项。
+- `vintcessun/xmu_assistant_sign_bot`：教学平台工具命令设计、考试 / 作业 / 答案 / 课堂互动查询思路。
+- `vintcessun/xmu_sign_qr`、`KrsMt-0113/XMU-Rollcall-bot_qrCode`：二维码签到流程调研。
+- `dangzitou/xmu-rollcall-bot-new`、`KrsMt-0113/xmu-rollcall-wechat-bot`：雷达点名与签到生态调研。
 
-- **🐾 极简主页**：只有一个可爱的粉色猫爪按钮，点击即刻唤醒系统。
-- **页面刷新跳转**：登录成功后自动“变身”，将抓取到的课程列表以按钮矩阵形式呈现。
-- **下拉式终端**：隐藏式抽屉设计，随时点击展开，查看硬核抓包日志。
-- **结果卡片**：醒目展示 4 位数字签到码、活动状态（进行中/已结束）及发起时间。
+## 开发与检查
 
-## 📖 使用指南 (Demo Tutorial)
+语法检查：
 
-![演示视频](assets/zako_rollcall_demo.mp4)
+```powershell
+.\.venv\Scripts\python.exe -m py_compile .\zako_app_V2.0.py .\zako_get_rollcall.py
+```
 
-根据演示视频，本应用的使用流程如下：
+提交前建议确认不会上传个人数据：
 
-1. **启动**：双击运行 `zako厦大签到.exe`。
-2. **第一步：点击猫爪**：
-   - 点击主界面中央巨大的 **🐾 猫爪按钮**。
-   - 系统会自动弹出内置浏览器，请在弹出的窗口中正常登录厦大统一认证系统。
-   - **注意**：一旦程序截获到 ID（终端会显示 ✅），浏览器会自动关闭，请不要惊慌喵。
-3. **第二步：选择课程**：
-   - 程序会自动跳转到课程列表页面，展示你本学期的所有课程。
-   - 点击你想要查询的那门课。
-4. **第三步：获取结果**：
-   - 程序会弹出一个精美的对话框，告知你最新的 **4 位签到码**、**发起时间**以及**当前状态**（进行中/已结束）。
-5. **查看日志（可选）**：
-   - 如果你想看后台到底发生了什么，点击屏幕下方的 **`💻 展开终端`**。所有的抓包细节、API 请求日志都会在这里实时滚动显示。
+```powershell
+git status --short
+git add --dry-run .
+```
 
+## 许可证
 
+本仓库主项目使用 MIT License。`integrations/score_query/` 保留其上游 MIT License 与版权声明。未直接随仓库分发的第三方项目不受本仓库 MIT License 覆盖，请分别遵守对应上游项目许可证。
 
----
-
-### 🐾 写在最后
-
-我的灵感首先来自同学分享的这个地址：https://lnt.xmu.edu.cn/api/rollcall/xxxxxx/student_rollcalls
-发现这似乎是老师端签到详情页！
-
-致敬前人已有的破解项目：
-
-https://github.com/KrsMt-0113/XMU-Rollcall-Bot
-
-感谢图标的作者：
-
-https://www.reddit.com/r/PixelArt/comments/j2k28q/cat_girl_character_any_criticism_is_appreciated/?tl=zh-hans
-
-以及我的舍友还写了一版纯用playwright库的点击操作完成的获取签到码py文件```rollcall_capture.py```，也放在这个仓库里了喵！
-
-如果你觉得好用，请给个 **Star** 喵⭐！如果有 Bug，欢迎提 Issue。再次提醒：**科技签到虽好，可不要旷课喵~**
-
-**本仓库代码主要用于交流研究，使用者进行不当操作与本作者无关喵！**
