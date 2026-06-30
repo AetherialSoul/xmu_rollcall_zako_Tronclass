@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -39,18 +40,48 @@ def setup_runtime_log():
 
 def acquire_single_instance_lock():
     lock_path = os.path.abspath("score_query.lock")
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode("ascii"))
-        os.close(fd)
-        return lock_path
-    except FileExistsError:
+    while True:
         try:
-            with open(lock_path, "r", encoding="utf-8") as f:
-                old_pid = f.read().strip()
-        except Exception:
-            old_pid = "unknown"
-        raise RuntimeError(f"成绩查询已在运行或上次异常退出未清理 lock: {lock_path}; pid={old_pid}")
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+            os.close(fd)
+            return lock_path
+        except FileExistsError:
+            try:
+                with open(lock_path, "r", encoding="utf-8") as f:
+                    old_pid = f.read().strip()
+            except Exception:
+                old_pid = ""
+            if not process_exists(old_pid):
+                print(f"检测到陈旧成绩查询锁文件，自动清理: {lock_path}; pid={old_pid or 'unknown'}", flush=True)
+                release_single_instance_lock(lock_path)
+                continue
+            raise RuntimeError(f"成绩查询已在运行: {lock_path}; pid={old_pid}")
+
+
+def process_exists(pid_text):
+    try:
+        pid = int(str(pid_text).strip())
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = (result.stdout or "").strip()
+        return bool(output) and "No tasks are running" not in output and str(pid) in output
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def release_single_instance_lock(lock_path):
@@ -59,6 +90,16 @@ def release_single_instance_lock(lock_path):
             os.remove(lock_path)
         except FileNotFoundError:
             pass
+
+
+def is_browser_closed_error(exc):
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return (
+        "targetclosed" in name
+        or "target page, context or browser has been closed" in text
+        or "browser has been closed" in text
+    )
 
 
 def launch_score_context(browser_type, headless):
@@ -561,12 +602,19 @@ def main():
                         notify("成绩查询异常", f"成绩查询接口返回 HTTP {exc.status}；程序继续运行，10 分钟后重试。")
                         time.sleep(config["interval"] * 60)
                 except Exception:
+                    exc = sys.exc_info()[1]
+                    if is_browser_closed_error(exc):
+                        print("成绩查询浏览器已关闭，程序正常退出。", flush=True)
+                        break
                     traceback.print_exc()
                     notify("成绩查询异常", "成绩查询接口返回异常；程序继续运行，10 分钟后重试。")
                     time.sleep(config["interval"] * 60)
     finally:
         if context is not None:
-            context.close()
+            try:
+                context.close()
+            except Exception:
+                pass
         release_single_instance_lock(lock_path)
         log_file.close()
 
