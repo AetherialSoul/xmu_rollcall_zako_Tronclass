@@ -5,8 +5,13 @@ This repository is the public packaging of the local XMU Study Toolkit integrati
 ## Core Files
 
 - `setup.bat` - creates the main virtual environment, installs dependencies, installs Playwright Chromium, and creates `account.local.json` from the template.
+- `setup_full.bat` - runs both core setup and optional integration setup for users who want every launcher button to work after installation.
 - `run.bat` - starts the GUI, running `setup.bat` first if the main virtual environment is missing.
 - `setup_optional_integrations.bat` - downloads optional upstream tools into ignored local integration directories.
+- `check_install.bat` - verifies core dependencies, Python syntax, and optional integration entry files.
+- `tools/install_pyproject_dependencies.py` - installs dependencies declared by optional integrations without vendoring their source into this repository.
+- `tools/pip_retry.py` - wraps pip install with retries, longer timeouts, and binary-wheel preference for unstable networks.
+- `tools/verify_install.py` - local installation verifier used by `check_install.bat`.
 - `tools/iqa_start_integrated.py` - local launcher shim copied into `integrations/iqa_helper/` so IQA can reuse this toolkit CAS profile and account environment variables.
 - `tools/course_user.example.yaml` - local config template copied into `integrations/course_helper/config/` when upstream lacks one.
 - `zako_app_V2.0.py` - unified GUI launcher, teaching-platform session, rollcall monitor, radar helper, learning-platform tools, settings page.
