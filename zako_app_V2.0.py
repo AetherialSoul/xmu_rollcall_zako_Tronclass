@@ -200,7 +200,11 @@ def load_account_data(log=print):
 
 def get_login_method():
     data = load_account_data(lambda _msg: None)
-    return normalize_login_method(data.get("login_method"))
+    if data.get("login_method") in ("browser", "account"):
+        return normalize_login_method(data.get("login_method"))
+    if str(data.get("username") or "").strip() and str(data.get("password") or ""):
+        return "account"
+    return "browser"
 
 
 def _line_ending(text):
@@ -332,7 +336,7 @@ def load_settings_values(log=print):
     return {
         "username": str(account_data.get("username") or ""),
         "password": str(account_data.get("password") or ""),
-        "login_method": normalize_login_method(account_data.get("login_method")),
+        "login_method": get_login_method(),
         "default_radar_location": str(account_data.get("default_radar_location") or ""),
         "score_auto_login_once": as_bool(yaml_get_section_scalar(score_text, "browser", "auto_login_once", True), True),
         "score_interval": settings_int(yaml_get_root_scalar(score_text, "interval", 10), 10, 1),
