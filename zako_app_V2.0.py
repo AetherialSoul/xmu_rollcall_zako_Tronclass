@@ -23,7 +23,6 @@ import os
 import sys
 import requests
 import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
@@ -61,7 +60,6 @@ SCORE_NOTIFY_CONFIG_FILE = SCORE_PROJECT_DIR / "config.yaml"
 LEGACY_SCORE_NOTIFY_CONFIG_FILE = Path.home() / "Documents" / "XMUScoreAutoQuery" / "config.yaml"
 LNT_REPORTS_DIR = APP_DIR / "lnt_reports"
 IDS_USERNAME_LOGIN_URL = "https://ids.xmu.edu.cn/authserver/login?type=userNameLogin"
-QR_SCAN_SESSION_TIMEOUT = 180
 HEADERS_BASE = {
     "accept": "application/json, text/plain, */*",
     "accept-language": "zh-CN,zh;q=0.9",
@@ -1591,125 +1589,6 @@ def build_radar_location_advice(latitude, longitude, custom_locations=None, loca
     return "\n".join(lines)
 
 
-QR_VALUE_SEP = chr(30)
-QR_FIELD_SEP = chr(31)
-QR_TYPED_PREFIX = chr(26)
-QR_NUMBER_PREFIX = chr(16)
-QR_TRUE_VALUE = QR_TYPED_PREFIX + "1"
-QR_FALSE_VALUE = QR_TYPED_PREFIX + "0"
-QR_TAG_FIELDS = [
-    "courseId", "activityId", "activityType", "data", "rollcallId",
-    "groupSetId", "accessCode", "action", "enableGroupRollcall", "createUser",
-    "joinCourse",
-]
-QR_TYPED_FIELDS = ["classroom-exam", "feedback", "vote"]
-QR_TAG_MAP = {format(idx, "x"): name for idx, name in enumerate(QR_TAG_FIELDS)}
-QR_TYPED_MAP = {QR_TYPED_PREFIX + format(idx + 2, "x"): name for idx, name in enumerate(QR_TYPED_FIELDS)}
-
-
-def _base36_to_int(value):
-    return int(str(value), 36)
-
-
-def _decode_qr_value(value):
-    value = str(value)
-    if value.startswith(QR_TYPED_PREFIX):
-        if value == QR_TRUE_VALUE:
-            return True
-        if value == QR_FALSE_VALUE:
-            return False
-        return QR_TYPED_MAP.get(value, value)
-    if value.startswith(QR_NUMBER_PREFIX):
-        parts = value[1:].split(".")
-        try:
-            nums = [_base36_to_int(part) for part in parts if part]
-        except Exception:
-            return value
-        if len(nums) >= 2:
-            return float(f"{nums[0]}.{nums[1]}")
-        if nums:
-            return nums[0]
-        return value
-    if value.startswith("%10"):
-        try:
-            return _base36_to_int(value[3:])
-        except Exception:
-            return value
-    return value.replace(QR_FIELD_SEP, "~").replace(QR_VALUE_SEP, "!")
-
-
-def parse_sign_qr_code(payload):
-    result = {}
-    if not payload or not isinstance(payload, str):
-        return result
-    for part in filter(None, payload.split("!")):
-        if "~" not in part:
-            continue
-        tag, value = part.split("~", 1)
-        key = QR_TAG_MAP.get(tag, tag)
-        result[key] = _decode_qr_value(value)
-    return result
-
-
-def parse_qr_scan_content(content):
-    raw = str(content or "").strip()
-    if not raw:
-        raise ValueError("二维码内容为空")
-
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-
-    if raw.startswith("/j?p=") or raw.startswith("/scanner-jumper"):
-        raw = BASE_URL + raw
-
-    if raw.startswith("http://") or raw.startswith("https://"):
-        parsed_url = urlparse.urlparse(raw)
-        query = urlparse.parse_qs(parsed_url.query)
-        embedded = query.get("_p", [None])[0]
-        if embedded:
-            try:
-                data = json.loads(embedded)
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
-        payload = query.get("p", [None])[0]
-        if payload:
-            return parse_sign_qr_code(payload)
-        raise ValueError("二维码链接中没有 p/_p 参数")
-
-    if raw.startswith("/j"):
-        parsed_url = urlparse.urlparse(BASE_URL + raw)
-        query = urlparse.parse_qs(parsed_url.query)
-        payload = query.get("p", [None])[0]
-        if payload:
-            return parse_sign_qr_code(payload)
-
-    return parse_sign_qr_code(raw)
-
-
-def normalize_qr_sign_data(content):
-    data = parse_qr_scan_content(content)
-    if not isinstance(data, dict) or not data:
-        raise ValueError("二维码内容无法解析")
-    rollcall_id = data.get("rollcallId") or data.get("rollcall_id") or data.get("activityId") or data.get("activity_id")
-    sign_data = data.get("data")
-    if rollcall_id is None:
-        raise ValueError("二维码缺少 rollcallId")
-    if sign_data is None or str(sign_data) == "":
-        raise ValueError("二维码缺少动态 data")
-    return {
-        "course_id": data.get("courseId") or data.get("course_id"),
-        "rollcall_id": str(rollcall_id),
-        "data": str(sign_data),
-        "raw": data,
-    }
-
-
 def find_number_code(data, depth=0, max_depth=10):
     if depth > max_depth:
         return None
@@ -1727,53 +1606,6 @@ def find_number_code(data, depth=0, max_depth=10):
             if nested:
                 return nested
     return None
-
-
-def send_qr_rollcall(expected_rollcall_id, cookie, qr_content, log=print):
-    """提交二维码签到。二维码内容必须来自用户现场扫码或手动粘贴。"""
-    try:
-        parsed = normalize_qr_sign_data(qr_content)
-    except Exception as exc:
-        msg = f"二维码解析失败：{exc}"
-        log(f"❌ {msg}")
-        return False, msg
-
-    scanned_rollcall_id = str(parsed["rollcall_id"])
-    expected = str(expected_rollcall_id) if expected_rollcall_id else scanned_rollcall_id
-    if expected and scanned_rollcall_id != expected:
-        msg = f"二维码签到 ID 不匹配：当前页面 {expected}，扫码得到 {scanned_rollcall_id}"
-        log(f"❌ {msg}")
-        return False, msg
-
-    headers = {
-        "user-agent": (
-            "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/141.0.0.0 Mobile Safari/537.36 Edg/141.0.0.0"
-        ),
-        "content-type": "application/json",
-        "cookie": cookie,
-    }
-    payload = {
-        "data": parsed["data"],
-        "deviceId": str(uuid.uuid4()),
-    }
-    try:
-        resp = requests.put(
-            f"{BASE_URL}/api/rollcall/{scanned_rollcall_id}/answer_qr_rollcall",
-            json=payload,
-            headers=headers,
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            log(f"✅ 二维码签到已提交，签到 ID：{scanned_rollcall_id}")
-            return True, None
-        msg = f"HTTP {resp.status_code}: {resp.text[:300]}"
-        log(f"❌ 二维码签到失败：{msg}")
-        return False, msg
-    except Exception as exc:
-        log(f"❌ 二维码签到请求异常：{exc}")
-        return False, str(exc)
 
 
 def send_number_rollcall(rollcall_id, cookie, number_code=None, log=print):
@@ -1978,231 +1810,6 @@ def run_async(coro, callback):
     threading.Thread(target=_run, daemon=True).start()
 
 
-QR_SCAN_PAGE_HTML = r'''<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>二维码签到</title>
-<style>
-:root { color-scheme: dark; }
-* { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; background: #0f0e17; color: #fffffe; font-family: -apple-system, BlinkMacSystemFont, "Microsoft YaHei", sans-serif; display: grid; place-items: center; }
-main { width: min(560px, 100vw); padding: 18px; }
-h1 { font-size: 20px; margin: 0 0 12px; }
-.panel { background: #1a1828; border: 1px solid #2b2940; border-radius: 8px; padding: 14px; }
-.video-wrap { position: relative; width: 100%; aspect-ratio: 1 / 1; background: #08070d; border-radius: 8px; overflow: hidden; }
-video, canvas { width: 100%; height: 100%; object-fit: cover; }
-canvas { display: none; }
-.scan-box { position: absolute; inset: 15%; border: 2px solid #06d6a0; border-radius: 8px; box-shadow: 0 0 0 999px rgba(0,0,0,.32); }
-.status { min-height: 24px; margin: 12px 0 0; color: #a7a9be; line-height: 1.5; word-break: break-word; }
-.row { display: flex; gap: 8px; margin-top: 12px; }
-button { flex: 1; border: 0; border-radius: 8px; padding: 11px 12px; color: #0f0e17; background: #06d6a0; font-weight: 700; font-size: 14px; }
-button.secondary { background: #221f33; color: #fffffe; }
-textarea { width: 100%; min-height: 92px; margin-top: 12px; border-radius: 8px; border: 1px solid #333049; background: #0f0e17; color: #fffffe; padding: 10px; resize: vertical; }
-.ok { color: #06d6a0; }
-.err { color: #ef476f; }
-</style>
-</head>
-<body>
-<main>
-  <h1>二维码签到</h1>
-  <section class="panel">
-    <div class="video-wrap">
-      <video id="video" autoplay playsinline muted></video>
-      <canvas id="canvas"></canvas>
-      <div class="scan-box"></div>
-    </div>
-    <div id="status" class="status">正在启动摄像头...</div>
-    <div class="row">
-      <button id="startBtn" type="button">重新扫码</button>
-      <button id="stopBtn" class="secondary" type="button">停止相机</button>
-    </div>
-    <textarea id="manual" placeholder="也可以在这里粘贴二维码内容，然后点手动提交"></textarea>
-    <div class="row">
-      <button id="manualBtn" type="button">手动提交</button>
-    </div>
-  </section>
-</main>
-<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
-<script>
-const token = "__TOKEN__";
-const submitUrl = "/submit?token=" + encodeURIComponent(token);
-const video = document.getElementById("video");
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
-const statusEl = document.getElementById("status");
-let stopped = false;
-let stream = null;
-function setStatus(text, cls) {
-  statusEl.textContent = text;
-  statusEl.className = "status" + (cls ? " " + cls : "");
-}
-async function submitContent(text) {
-  if (!text || !text.trim()) {
-    setStatus("没有二维码内容", "err");
-    return;
-  }
-  stopCamera();
-  setStatus("已识别，正在提交到本机程序...", "ok");
-  try {
-    const res = await fetch(submitUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
-    });
-    const data = await res.json();
-    setStatus(data.message || (res.ok ? "已提交" : "提交失败"), res.ok ? "ok" : "err");
-  } catch (err) {
-    setStatus("提交失败: " + err.message, "err");
-  }
-}
-async function startCamera() {
-  stopped = false;
-  stopCamera();
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } });
-    video.srcObject = stream;
-    await video.play();
-    setStatus("请对准课堂二维码", "");
-    requestAnimationFrame(tick);
-  } catch (err) {
-    setStatus("无法访问摄像头: " + err.message, "err");
-  }
-}
-function stopCamera() {
-  stopped = true;
-  if (stream) {
-    stream.getTracks().forEach(track => track.stop());
-    stream = null;
-  }
-}
-function tick() {
-  if (stopped) return;
-  if (video.readyState === video.HAVE_ENOUGH_DATA) {
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const code = jsQR(img.data, img.width, img.height);
-    if (code && code.data) {
-      submitContent(code.data);
-      return;
-    }
-  }
-  requestAnimationFrame(tick);
-}
-document.getElementById("startBtn").onclick = startCamera;
-document.getElementById("stopBtn").onclick = () => { stopCamera(); setStatus("相机已停止", ""); };
-document.getElementById("manualBtn").onclick = () => submitContent(document.getElementById("manual").value);
-startCamera();
-</script>
-</body>
-</html>'''
-
-
-class LocalQrScanServer:
-    def __init__(self, app):
-        self.app = app
-        self.httpd = None
-        self.thread = None
-        self.port = None
-        self.sessions = {}
-
-    def ensure_started(self):
-        if self.httpd:
-            return
-        server = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, _format, *args):
-                return
-
-            def _send_text(self, status, text, content_type="text/plain; charset=utf-8"):
-                data = text.encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(data)
-
-            def _send_json(self, status, payload):
-                self._send_text(status, json.dumps(payload, ensure_ascii=False), "application/json; charset=utf-8")
-
-            def do_GET(self):
-                parsed = urlparse.urlparse(self.path)
-                if parsed.path != "/scan":
-                    self._send_text(404, "not found")
-                    return
-                token = urlparse.parse_qs(parsed.query).get("token", [""])[0]
-                session = server.sessions.get(token)
-                if not session or time.time() > session["expires_at"]:
-                    self._send_text(404, "扫码会话不存在或已过期")
-                    return
-                html = QR_SCAN_PAGE_HTML.replace("__TOKEN__", token)
-                self._send_text(200, html, "text/html; charset=utf-8")
-
-            def do_POST(self):
-                parsed = urlparse.urlparse(self.path)
-                if parsed.path != "/submit":
-                    self._send_json(404, {"ok": False, "message": "not found"})
-                    return
-                token = urlparse.parse_qs(parsed.query).get("token", [""])[0]
-                session = server.sessions.get(token)
-                if not session or time.time() > session["expires_at"]:
-                    self._send_json(404, {"ok": False, "message": "扫码会话不存在或已过期"})
-                    return
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                    body = self.rfile.read(min(length, 1024 * 256)).decode("utf-8")
-                    payload = json.loads(body or "{}")
-                    content = str(payload.get("text") or "").strip()
-                except Exception as exc:
-                    self._send_json(400, {"ok": False, "message": f"请求解析失败: {exc}"})
-                    return
-                if not content:
-                    self._send_json(400, {"ok": False, "message": "没有二维码内容"})
-                    return
-                server.app.after(0, lambda: session["callback"](content))
-                self._send_json(200, {"ok": True, "message": "已回传二维码内容，请回到桌面程序查看结果"})
-
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.port = self.httpd.server_address[1]
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-        self.thread.start()
-        self.app._log(f"✅ 本机二维码扫码服务已启动：http://127.0.0.1:{self.port}")
-
-    def create_session(self, callback):
-        self.ensure_started()
-        self.cleanup_expired()
-        token = uuid.uuid4().hex
-        self.sessions[token] = {
-            "callback": callback,
-            "expires_at": time.time() + QR_SCAN_SESSION_TIMEOUT,
-        }
-        return f"http://127.0.0.1:{self.port}/scan?token={token}"
-
-    def cleanup_expired(self):
-        now = time.time()
-        for token, session in list(self.sessions.items()):
-            if now > session["expires_at"]:
-                self.sessions.pop(token, None)
-
-    def stop(self):
-        if not self.httpd:
-            return
-        try:
-            self.httpd.shutdown()
-            self.httpd.server_close()
-        except Exception:
-            pass
-        self.httpd = None
-        self.thread = None
-        self.port = None
-        self.sessions.clear()
-
-
 def run_sync_in_thread(fn, callback, *args, **kwargs):
     """在独立线程里运行普通同步函数，完成后 callback 送回结果。"""
     def _run():
@@ -2267,7 +1874,6 @@ class ZakoApp(ctk.CTk):
         self._monitor_interval = 30
         self._monitor_status_label = None
         self._score_process = None
-        self._qr_scan_server = LocalQrScanServer(self)
         self._auto_mode = False
         atexit.register(self._cleanup_child_processes)
 
@@ -2368,8 +1974,6 @@ class ZakoApp(ctk.CTk):
 
     def _cleanup_child_processes(self):
         self._monitor_stop.set()
-        if hasattr(self, "_qr_scan_server") and self._qr_scan_server:
-            self._qr_scan_server.stop()
         self._terminate_process_tree(self._score_process, "成绩查询")
         self._score_process = None
 
@@ -2458,7 +2062,7 @@ class ZakoApp(ctk.CTk):
         ctk.CTkFrame(f, fg_color=BG, height=10).pack()
 
         self._home_status = make_label(
-            f, "教学平台包含签到、雷达点名提醒和学习通工具。",
+            f, "运行 setup.bat 初始化；自动评教/选课用 setup_optional_integrations.bat 安装。",
             size=12, color=TEXT_SEC, anchor="center"
         )
         self._home_status.pack()
@@ -2754,12 +2358,29 @@ class ZakoApp(ctk.CTk):
             self._log("ℹ️ 成绩查询使用教务系统登录态，和学习通同属 CAS，但会单独保存浏览器会话。")
         except Exception as exc:
             self._log(f"❌ 成绩查询启动失败: {exc}")
+    def _show_optional_integration_missing(self, feature, expected_path):
+        setup_script = APP_DIR / "setup_optional_integrations.bat"
+        self._log(f"❌ {feature}可选集成尚未安装：找不到 {expected_path}")
+        self._log(f"ℹ️ 请先在项目根目录运行 {setup_script.name}，它会把对应上游项目下载到 integrations/。")
+        if hasattr(self, "_home_status"):
+            self._set_home_status(f"{feature}未安装，请运行 {setup_script.name}", WARN)
+        try:
+            message = (
+                f"{feature}还没有安装到本机。\n\n"
+                f"请在项目根目录运行：\n{setup_script.name}\n\n"
+                f"安装后再回到这里点击按钮。\n\n"
+                f"期望路径：\n{expected_path}"
+            )
+            messagebox.showinfo("可选功能未安装", message, parent=self)
+        except Exception:
+            pass
+
     def _start_iqa_helper(self):
         """Launch the automatic course evaluation helper."""
         try:
             script = IQA_PROJECT_DIR / "start.bat"
             if not script.exists():
-                self._log(f"❌ 自动评教启动失败：找不到 {script}")
+                self._show_optional_integration_missing("自动评教", script)
                 return
             env = os.environ.copy()
             env["XMU_CAS_PROFILE_DIR"] = str(LOGIN_STATE_DIR)
@@ -2782,18 +2403,15 @@ class ZakoApp(ctk.CTk):
     def _start_course_helper(self):
         """Launch the course selection helper."""
         try:
-            sync_course_account_config(self._log)
             script = COURSE_HELPER_DIR / "client.py"
             config = COURSE_HELPER_DIR / "config" / "user.yaml"
             example = COURSE_HELPER_DIR / "config" / "user.example.yaml"
-            if not COURSE_HELPER_DIR.exists():
-                self._log(f"❌ 选课项目不存在: {COURSE_HELPER_DIR}")
-                return
             if not script.exists():
-                self._log("❌ 选课启动失败：缺少 client.py")
+                self._show_optional_integration_missing("选课助手", script)
                 return
+            sync_course_account_config(self._log)
             if not config.exists() and example.exists():
-                cmd_line = 'copy "config\\user.example.yaml" "config\\user.yaml" >nul && echo Created config\\user.yaml. Fill it, save it, then run again. && notepad "config\\user.yaml"'
+                cmd_line = r'copy "config\user.example.yaml" "config\user.yaml" >nul && echo Created config\user.yaml. Fill it, save it, then run again. && notepad "config\user.yaml"'
                 subprocess.Popen(
                     ["cmd", "/k", cmd_line],
                     cwd=str(COURSE_HELPER_DIR),
@@ -3684,12 +3302,6 @@ class ZakoApp(ctk.CTk):
 
         if rollcall_id:
             make_button(
-                btn_frame, "二维码签到",
-                command=lambda: self._show_qr_page(rollcall_id, course_id, course_name),
-                fg=ACCENT, hover=ACCENT_DK,
-                width=130, height=38
-            ).pack(side="right", padx=(6, 20))
-            make_button(
                 btn_frame, "雷达签到",
                 command=lambda: self._show_radar_page(rollcall_id, course_id, course_name),
                 fg=SUCCESS, hover="#04B888",
@@ -3702,105 +3314,6 @@ class ZakoApp(ctk.CTk):
                     fg=SUCCESS, hover="#04B888",
                     width=120, height=38
                 ).pack(side="right", padx=6)
-    # =======================================================
-    # 二维码签到页面
-    # =======================================================
-    def _show_qr_page(self, rollcall_id, course_id, course_name):
-        self._clear_content()
-        f = self._content
-
-        hdr = ctk.CTkFrame(f, fg_color=BG)
-        hdr.pack(fill="x", padx=12, pady=(14, 4))
-        ctk.CTkButton(
-            hdr, text="← 返回", width=72, height=32,
-            fg_color=SURFACE2, hover_color=SURFACE, text_color=TEXT_SEC,
-            font=("Microsoft YaHei", 12), corner_radius=8,
-            command=lambda: self._show_code(course_id, course_name),
-        ).pack(side="left")
-        make_label(hdr, text="二维码签到", size=15, bold=True).pack(side="left", padx=10)
-        separator(f).pack(fill="x", padx=20, pady=6)
-
-        card = ctk.CTkFrame(f, fg_color=SURFACE, corner_radius=14)
-        card.pack(fill="both", expand=True, padx=18, pady=12)
-
-        make_label(card, course_name, size=15, bold=True, anchor="center", wraplength=520).pack(pady=(20, 4))
-        make_label(card, f"签到 ID：{rollcall_id}", size=12, color=TEXT_SEC, anchor="center").pack(pady=(0, 14))
-
-        status_var = tk.StringVar(value="打开本机扫码页后，用浏览器摄像头对准课堂二维码。")
-        status_label = make_label(card, status_var.get(), size=12, color=TEXT_SEC, anchor="center", wraplength=520)
-        status_label.pack(fill="x", padx=24, pady=(0, 12))
-
-        def _set_status(text, color=TEXT_SEC):
-            status_var.set(text)
-            status_label.configure(text=text, text_color=color)
-            self._log(text)
-
-        def _submit_content(content):
-            _set_status("正在提交二维码签到...", WARN)
-
-            def _run():
-                return send_qr_rollcall(rollcall_id, self._cookie, content, self._log)
-
-            def _done(result, err):
-                if err:
-                    msg = f"二维码签到异常：{err}"
-                    self.after(0, lambda: _set_status(msg, DANGER))
-                    self.after(0, lambda: messagebox.showerror("二维码签到", msg, parent=self))
-                    return
-                ok, reason = result
-                if ok:
-                    self.after(0, lambda: _set_status("二维码签到提交成功。", SUCCESS))
-                    self.after(0, lambda: messagebox.showinfo("二维码签到", f"{course_name}\n提交成功。", parent=self))
-                else:
-                    msg = reason or "二维码签到失败"
-                    self.after(0, lambda: _set_status(msg, DANGER))
-                    self.after(0, lambda: messagebox.showerror("二维码签到失败", f"{course_name}\n{msg}", parent=self))
-
-            run_sync_in_thread(_run, _done)
-
-        def _open_scan_page():
-            try:
-                url = self._qr_scan_server.create_session(_submit_content)
-                webbrowser.open(url)
-                _set_status(f"扫码页已打开，有效期 {QR_SCAN_SESSION_TIMEOUT} 秒。", SUCCESS)
-            except Exception as exc:
-                msg = f"打开扫码页失败：{exc}"
-                _set_status(msg, DANGER)
-                messagebox.showerror("二维码签到", msg, parent=self)
-
-        make_button(
-            card, "打开本机扫码页",
-            command=_open_scan_page,
-            fg=SUCCESS, hover="#04B888",
-            width=260, height=44, size=14,
-        ).pack(pady=(4, 12))
-
-        make_label(card, "手动粘贴二维码内容", size=12, color=TEXT_SEC, anchor="w").pack(fill="x", padx=36, pady=(12, 4))
-        qr_text = ctk.CTkTextbox(
-            card,
-            height=130,
-            fg_color=SURFACE2,
-            text_color=TEXT_PRI,
-            font=("Courier New", 11),
-            wrap="word",
-            corner_radius=10,
-        )
-        qr_text.pack(fill="x", padx=36, pady=(0, 10))
-
-        btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        btn_row.pack(fill="x", padx=36, pady=(0, 18))
-        make_button(
-            btn_row, "提交粘贴内容",
-            command=lambda: _submit_content(qr_text.get("1.0", "end").strip()),
-            width=180, height=38,
-        ).pack(side="left")
-        make_button(
-            btn_row, "返回签到码",
-            command=lambda: self._show_code(course_id, course_name),
-            fg=SURFACE2, hover=ACCENT_DK,
-            width=140, height=38,
-        ).pack(side="right")
-
     # =======================================================
     # 雷达签到页面
     # =======================================================

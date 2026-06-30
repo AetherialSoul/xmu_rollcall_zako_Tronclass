@@ -1,23 +1,34 @@
 # Integration Notes
 
-This repository is the public, license-safe packaging of the local XMU Study Toolkit integration.
+This repository is the public packaging of the local XMU Study Toolkit integration.
 
 ## Core Files
 
-- `zako_app_V2.0.py` - unified GUI launcher, teaching-platform session, rollcall monitor, QR/radar helpers, learning-platform tools, settings page.
+- `setup.bat` - creates the main virtual environment, installs dependencies, installs Playwright Chromium, and creates `account.local.json` from the template.
+- `run.bat` - starts the GUI, running `setup.bat` first if the main virtual environment is missing.
+- `setup_optional_integrations.bat` - downloads optional upstream tools into ignored local integration directories.
+- `tools/iqa_start_integrated.py` - local launcher shim copied into `integrations/iqa_helper/` so IQA can reuse this toolkit CAS profile and account environment variables.
+- `tools/course_user.example.yaml` - local config template copied into `integrations/course_helper/config/` when upstream lacks one.
+- `zako_app_V2.0.py` - unified GUI launcher, teaching-platform session, rollcall monitor, radar helper, learning-platform tools, settings page.
 - `zako_get_rollcall.py` - CLI teaching-platform rollcall query.
 - `integrations/score_query/` - included score-query integration, based on MIT-licensed score-query work.
 - `account.example.json` - local account template.
 - `THIRD_PARTY_PROJECTS.md` - upstream references and license boundaries.
 
-## Optional Local-Only Tools
+## Optional Local Tools
 
-The GUI has buttons for these tools, but this public repository does not vendor their source trees:
+The GUI has buttons for these tools. They are installed by running:
 
-- `integrations/iqa_helper/` - automatic evaluation helper, expected entry `start.bat`.
-- `integrations/course_helper/` - course-selection helper, expected entry `client.py`.
+```powershell
+.\setup_optional_integrations.bat
+```
 
-Reason: during local review, `XMUIQAHelper` was GPL-3.0 and `XMUCourseHelper` had no detected GitHub license file. Keeping them local avoids mixing unclear or incompatible licensing into the MIT public repository.
+Expected local paths after installation:
+
+- `integrations/iqa_helper/start.bat` - automatic evaluation helper launcher.
+- `integrations/course_helper/client.py` - course-selection helper.
+
+These directories remain ignored by Git. They are pulled by each user locally instead of being vendored into this repository.
 
 ## Login Model
 
@@ -44,6 +55,11 @@ Templates kept in the repo:
 
 - `account.example.json`
 - `integrations/score_query/config.yaml.example`
+
+Generated locally by optional setup:
+
+- `integrations/course_helper/config/user.example.yaml`
+- `integrations/iqa_helper/start.bat`
 
 ## Publishing Notes
 

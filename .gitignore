@@ -32,6 +32,7 @@ runtime.log
 *.log
 
 # Local-only launchers/backups
+integrations/*/*.bat
 *.bak
 *.bak_*
 *.lnk

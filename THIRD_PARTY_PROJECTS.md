@@ -1,13 +1,22 @@
 # Third-Party Projects
 
-This file records which projects were integrated, referenced, or deliberately kept external while building the public XMU Study Toolkit repository.
+This file records which projects were integrated, referenced, or installed optionally while building the public XMU Study Toolkit repository.
 
 ## Included In This Repository
 
 | Project | Upstream / Source | Local Path | Role | License Notes |
 | --- | --- | --- | --- | --- |
-| `xmu_rollcall_zako_Tronclass` | https://github.com/YixuAnsensei/xmu_rollcall_zako_Tronclass | repository root | Base GUI, TronClass login/session handling, rollcall monitor, teaching-platform tools, settings page, QR/radar helpers. | MIT, see root `LICENSE`. |
+| `xmu_rollcall_zako_Tronclass` | https://github.com/YixuAnsensei/xmu_rollcall_zako_Tronclass | repository root | Base GUI, TronClass login/session handling, rollcall monitor, teaching-platform tools, settings page, radar helper. | MIT, see root `LICENSE`. |
 | `XMUScoreAutoQuery` / completion-query variant | https://github.com/hankeke303/XMUScoreAutoQuery and https://github.com/AetherialSoul/XMUScoreCompletionQuery | `integrations/score_query` | Score-query backend launched by the unified GUI. Includes browser-login mode, standard score source, completion-plan source, local notifications, and SMTP option. | MIT; upstream notice is preserved in `integrations/score_query/LICENSE`. |
+
+## Optional User-Installed Integrations
+
+These projects are not vendored in this repository. Users can install them locally by running `setup_optional_integrations.bat`, which clones the upstream repositories into Git-ignored paths under `integrations/`.
+
+| Project | URL | Installed Path | What This Toolkit Uses | License / Packaging Treatment |
+| --- | --- | --- | --- | --- |
+| `XMUIQAHelper` | https://github.com/vintcessun/XMUIQAHelper | `integrations/iqa_helper` | Automatic evaluation flow. The toolkit copies a local launcher shim and passes `XMU_CAS_PROFILE_DIR`, `XMU_USERNAME`, and `XMU_PASSWORD` when launching its `start.bat`. | Optional local install only. GitHub API reported GPL-3.0 during local review, so source is not bundled into this MIT repository. |
+| `XMUCourseHelper` | https://github.com/wegret/XMUCourseHelper | `integrations/course_helper` | Course-selection helper, polling interval options, captcha configuration model, and local token cache behavior. | Optional local install only. No GitHub license file was detected during local review, so source is not bundled. |
 
 ## Referenced But Not Vendored
 
@@ -15,10 +24,8 @@ These projects informed feature design or local experiments, but their source co
 
 | Project | URL | What Was Referenced | Public Repo Treatment |
 | --- | --- | --- | --- |
-| `XMUIQAHelper` | https://github.com/vintcessun/XMUIQAHelper | Automatic evaluation flow and CAS profile reuse through `XMU_CAS_PROFILE_DIR`. | Optional local integration only. GitHub API reported GPL-3.0 during local review, so it is not bundled into this MIT repository. |
-| `XMUCourseHelper` | https://github.com/wegret/XMUCourseHelper | Course-selection helper, polling interval options, captcha configuration model, and local token cache behavior. | Optional local integration only. No GitHub license file was detected during local review, so it is not bundled. |
-| `xmu_assistant_sign_bot` | https://github.com/vintcessun/xmu_assistant_sign_bot | Teaching-platform command design, exam/homework list flow, question and answer retrieval ideas, classroom interaction querying, QR-sign architecture, and web/rich-text exposure pattern. | Reference only. GitHub API reported AGPL-3.0 during local review, so code was not copied. |
-| `xmu_sign_qr` | https://github.com/vintcessun/xmu_sign_qr | QR-code rollcall research and parsing/submission flow comparison. | Reference only; no direct vendoring. |
+| `xmu_assistant_sign_bot` | https://github.com/vintcessun/xmu_assistant_sign_bot | Teaching-platform command design, exam/homework list flow, question and answer retrieval ideas, classroom interaction querying, and web/rich-text exposure pattern. | Reference only. GitHub API reported AGPL-3.0 during local review, so code was not copied. |
+| `xmu_sign_qr` | https://github.com/vintcessun/xmu_sign_qr | QR-code rollcall research and parsing/submission flow comparison. | Reference only; current public version does not include QR sign-in. |
 | `XMU-Rollcall-bot_qrCode` | https://github.com/KrsMt-0113/XMU-Rollcall-bot_qrCode | Browser-front-end QR recognition and QR payload parsing research. | Reference only. No GitHub license file was detected during local review. |
 | `xmu-rollcall-wechat-bot` | https://github.com/KrsMt-0113/xmu-rollcall-wechat-bot | Rollcall bot ecosystem and radar/location behavior research. | Reference only; no direct vendoring. |
 | `xmu-rollcall-bot-new` | https://github.com/dangzitou/xmu-rollcall-bot-new | Rollcall bot/fork comparison and radar-sign behavior research. | Reference only; no direct vendoring. |
@@ -26,28 +33,6 @@ These projects informed feature design or local experiments, but their source co
 | `xmulogin` | https://github.com/KrsMt-0113/xmulogin | XMU CAS/login SDK reference from the repository survey. | Reference only. |
 | `xmu-question-bank` | https://github.com/F5Soft/xmu-question-bank | Question-bank ecosystem reference from the repository survey. | Reference only. |
 | `xmu-xigai-question-bank` | https://github.com/CatNebulaaaa/xmu-xigai-question-bank | Learning-platform question/answer collection reference from the repository survey. | Reference only. |
-
-## Local Integration Convention
-
-The GUI keeps launch buttons for optional external tools. If a user has independently obtained these tools and accepts their license terms, they can place them at:
-
-- `integrations/iqa_helper/start.bat`
-- `integrations/course_helper/client.py`
-
-Both directories are ignored by Git in this public repository to avoid redistributing code with incompatible or unclear licensing.
-
-## Local Survey Artifact
-
-The broader XMU repository survey used during development was kept locally at:
-
-- `C:\Users\17859\Desktop\xmu_github_projects.md`
-
-It covered public XMU-related repositories as of 2026-06-30 and was used to discover candidate projects in these categories:
-
-- TronClass / rollcall / Moodle helpers
-- score, course selection, and educational administration tools
-- IQA/evaluation and question-bank tools
-- general XMU assistant projects
 
 ## Do Not Commit
 
@@ -64,6 +49,8 @@ Cookie.txt
 integrations/score_query/config.yaml
 integrations/score_query/scores.yaml
 integrations/score_query/browser_profile/
+integrations/iqa_helper/
+integrations/course_helper/
 integrations/course_helper/config/user.yaml
 integrations/course_helper/cache/XMUClient.json
 *.log
