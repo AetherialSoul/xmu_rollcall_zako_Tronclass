@@ -69,6 +69,8 @@ HEADERS_BASE = {
         "Chrome/147.0.0.0 Safari/537.36"
     ),
 }
+ACTIVE_NUMBER_STATUSES = {"active", "in_progress", "on_call", "ongoing"}
+FINISHED_NUMBER_STATUSES = {"finished", "closed", "ended", "expired"}
 
 # ==============================================================================
 # 后端逻辑（完美继承原有机制，仅增加 log 参数用于重定向输出到 UI）
@@ -753,7 +755,16 @@ def get_number_code(rollcall_id, cookie):
     url  = f"{BASE_URL}/api/rollcall/{rollcall_id}/student_rollcalls"
     resp = requests.get(url, headers=headers)
     data = resp.json()
-    return data.get("number_code"), data.get("status"), data.get("end_time")
+    status = str(data.get("status") or "").lower()
+    return data.get("number_code"), status, data.get("end_time")
+
+
+def is_number_rollcall_active(status):
+    return str(status or "").lower() in ACTIVE_NUMBER_STATUSES
+
+
+def is_number_rollcall_finished(status):
+    return str(status or "").lower() in FINISHED_NUMBER_STATUSES
 
 def get_radar_rollcalls(cookie, log=print):
     data = lnt_get_json(cookie, "/api/radar/rollcalls?api_version=1.1.0", log)
@@ -2678,7 +2689,7 @@ class ZakoApp(ctk.CTk):
                                 continue
                             number_code, status, _ = get_number_code(rollcall_id, self._cookie)
                             key = f"number:{course_id}:{rollcall_id}"
-                            if status == "active":
+                            if is_number_rollcall_active(status):
                                 active_count += 1
                                 if key not in self._monitor_seen:
                                     self._monitor_seen.add(key)
@@ -2694,7 +2705,7 @@ class ZakoApp(ctk.CTk):
                                             "number_code": number_code,
                                             "time": rollcall_time,
                                         })
-                            elif key not in self._monitor_seen and status == "finished":
+                            elif key not in self._monitor_seen and is_number_rollcall_finished(status):
                                 self._monitor_seen.add(key)
                         except Exception as exc:
                             self._log(f"[monitor] {course_name} number check failed: {exc}")
@@ -3253,7 +3264,16 @@ class ZakoApp(ctk.CTk):
             make_label(inner, "这门课还没有签到喵~", size=13, color=TEXT_SEC, anchor="center").pack()
 
         elif result["code"]:
-            status_map   = {"active": ("✅ 进行中", SUCCESS), "finished": ("🔒 已结束", TEXT_SEC)}
+            status_map = {
+                "active": ("✅ 进行中", SUCCESS),
+                "in_progress": ("✅ 进行中", SUCCESS),
+                "on_call": ("✅ 进行中", SUCCESS),
+                "ongoing": ("✅ 进行中", SUCCESS),
+                "finished": ("🔒 已结束", TEXT_SEC),
+                "closed": ("🔒 已结束", TEXT_SEC),
+                "ended": ("🔒 已结束", TEXT_SEC),
+                "expired": ("🔒 已结束", TEXT_SEC),
+            }
             status_txt, status_clr = status_map.get(result["status"], (result["status"], TEXT_SEC))
 
             ctk.CTkLabel(inner, text="🐾", font=("Segoe UI Emoji", 46)).pack()
@@ -3311,7 +3331,7 @@ class ZakoApp(ctk.CTk):
                 fg=SUCCESS, hover="#04B888",
                 width=120, height=38
             ).pack(side="right", padx=6)
-            if result and result.get("code") and result.get("status") == "active":
+            if result and result.get("code") and is_number_rollcall_active(result.get("status")):
                 make_button(
                     btn_frame, "数字签到",
                     command=lambda: self._submit_number_rollcall(course_name, rollcall_id, result.get("code")),
