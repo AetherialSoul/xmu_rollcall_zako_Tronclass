@@ -1784,50 +1784,8 @@ def parse_radar_failure(resp):
 
 
 
-def _latlon_to_xy(lat, lon, lat0, lon0):
-    R = 6371000
-    x = math.radians(lon - lon0) * R * math.cos(math.radians(lat0))
-    y = math.radians(lat - lat0) * R
-    return x, y
-
-
-def _xy_to_latlon(x, y, lat0, lon0):
-    R = 6371000
-    lat = lat0 + math.degrees(y / R)
-    lon = lon0 + math.degrees(x / (R * math.cos(math.radians(lat0))))
-    return lat, lon
-
-
-def _circle_intersections(x1, y1, d1, x2, y2, d2):
-    D = math.hypot(x2 - x1, y2 - y1)
-    if D > d1 + d2 or D < abs(d1 - d2):
-        return None
-    a = (d1**2 - d2**2 + D**2) / (2 * D)
-    h = math.sqrt(d1**2 - a**2)
-    xm = x1 + a * (x2 - x1) / D
-    ym = y1 + a * (y2 - y1) / D
-    rx = -(y2 - y1) * (h / D)
-    ry = (x2 - x1) * (h / D)
-    return (xm + rx, ym + ry), (xm - rx, ym - ry)
-
-
-def _trilaterate(lat1, lon1, lat2, lon2, d1, d2):
-    lat0 = (lat1 + lat2) / 2
-    lon0 = (lon1 + lon2) / 2
-    x1, y1 = _latlon_to_xy(lat1, lon1, lat0, lon0)
-    x2, y2 = _latlon_to_xy(lat2, lon2, lat0, lon0)
-    sols = _circle_intersections(x1, y1, d1, x2, y2, d2)
-    if sols is None:
-        return None
-    return _xy_to_latlon(sols[0][0], sols[0][1], lat0, lon0), _xy_to_latlon(sols[1][0], sols[1][1], lat0, lon0)
-
-
 def send_radar_rollcall(rollcall_id, cookie, latitude, longitude, log=print, location_name=None, custom_locations=None):
-    """向畅课平台发送雷达（GPS）签到请求。调用方必须已经获得用户确认。
-
-    支持自动坐标修正：如果首次提交距离过远，会使用两个探测点
-    进行三边测量（trilateration）推算签到点的精确位置后重试。
-    """
+    """向畅课平台发送雷达（GPS）签到请求。只提交调用方已确认的单个现场坐标。"""
     url = f"{BASE_URL}/api/rollcall/{rollcall_id}/answer?api_version=1.76"
     headers = {
         "user-agent": (
@@ -1851,45 +1809,20 @@ def send_radar_rollcall(rollcall_id, cookie, latitude, longitude, log=print, loc
             "speed": None,
         }
 
-    def _do_submit(lat, lng):
-        return requests.put(url, json=_build_payload(lat, lng), headers=headers, timeout=10)
-
     try:
-        resp = _do_submit(latitude, longitude)
+        lat_v = float(latitude)
+        lng_v = float(longitude)
+        resp = requests.put(url, json=_build_payload(lat_v, lng_v), headers=headers, timeout=10)
         if resp.status_code == 200:
-            log(f"✅ 雷达签到成功喵❤！位置 ({latitude}, {longitude})")
+            log(f"✅ 雷达签到成功喵❤！位置 ({lat_v}, {lng_v})")
             return True, None
 
         detail = parse_radar_failure_detail(resp)
         d1 = detail.get("distance")
-        if d1 is not None and d1 > 0:
-            PROBE_LAT_1, PROBE_LON_1 = 24.3, 118.0
-            PROBE_LAT_2, PROBE_LON_2 = 24.6, 118.2
-
-            resp1 = _do_submit(PROBE_LAT_1, PROBE_LON_1)
-            data1 = resp1.json() if resp1.status_code != 200 else {}
-            if resp1.status_code == 200:
-                return True, None
-            dist1 = _parse_float(data1.get("distance")) if isinstance(data1, dict) else None
-
-            resp2 = _do_submit(PROBE_LAT_2, PROBE_LON_2)
-            data2 = resp2.json() if resp2.status_code != 200 else {}
-            if resp2.status_code == 200:
-                return True, None
-            dist2 = _parse_float(data2.get("distance")) if isinstance(data2, dict) else None
-
-            if dist1 is not None and dist2 is not None and dist1 > 0 and dist2 > 0:
-                sols = _trilaterate(PROBE_LAT_1, PROBE_LON_1, PROBE_LAT_2, PROBE_LON_2, dist1, dist2)
-                if sols:
-                    for sol_lat, sol_lon in sols:
-                        sol_resp = _do_submit(sol_lat, sol_lon)
-                        if sol_resp.status_code == 200:
-                            return True, None
-
         msg = format_radar_failure_detail(detail)
         advice = build_radar_location_advice(
-            latitude,
-            longitude,
+            lat_v,
+            lng_v,
             custom_locations or {},
             location_name=location_name,
             server_distance=d1,
@@ -2647,7 +2580,7 @@ class ZakoApp(ctk.CTk):
                 loc_name, lat, lng = default_loc
                 ok = messagebox.askyesno(
                     "确认雷达签到",
-                    f"检测到雷达签到：\n\n课程：{course_name}\n默认位置：{loc_name}\n坐标：{lat}, {lng}\n\n是否用该位置提交？",
+                    f"检测到雷达签到：\n\n课程：{course_name}\n默认位置：{loc_name}\n坐标：{lat}, {lng}\n\n请确认本人已在现场，是否提交该位置？",
                     parent=self,
                 )
                 if ok:
@@ -2724,31 +2657,16 @@ class ZakoApp(ctk.CTk):
 
         run_sync_in_thread(_run, _done)
 
-    def _auto_submit_radar_rollcall(self, course_name, rollcall_id):
-        default_loc = get_default_radar_location(self._custom_radar_locations)
-        if default_loc:
-            loc_name, lat, lng = default_loc
-            self._set_monitor_status(f"自动提交雷达签到：{course_name}", WARN)
-
-            def _run():
-                return send_radar_rollcall(rollcall_id, self._cookie, lat, lng, self._log, loc_name, self._custom_radar_locations)
-
-            def _done(result, err):
-                if err:
-                    self._log(f"❌ 自动雷达签到异常: {err}")
-                    self._set_monitor_status("自动雷达签到异常", DANGER)
-                    return
-                ok, reason = result
-                if ok:
-                    self._set_monitor_status(f"自动雷达签到已提交：{course_name}", SUCCESS)
-                    self._log(f"✅ 自动雷达签到成功：{course_name}")
-                else:
-                    self._set_monitor_status(f"自动雷达签到失败：{reason}", DANGER)
-                    self._log(f"❌ 自动雷达签到失败：{course_name} - {reason}")
-
-            run_sync_in_thread(_run, _done)
-        else:
-            self._log(f"⚠️ 未设置默认雷达位置，跳过自动雷达签到：{course_name}")
+    def _prompt_radar_rollcall_confirmation(self, course_name, rollcall_id, course_id="-", event_time="待签到"):
+        self._log(f"⚠️ 检测到雷达签到：{course_name}。雷达签到需要现场确认位置，已切换为手动确认。")
+        self._set_monitor_status(f"雷达签到待现场确认：{course_name}", WARN)
+        self._prompt_rollcall_confirmation({
+            "kind": "radar",
+            "course_id": course_id,
+            "course_name": course_name,
+            "rollcall_id": rollcall_id,
+            "time": event_time,
+        })
 
     def _prompt_rollcall_confirmation(self, event):
         self.after(0, lambda: self._confirm_rollcall_submit(event))
@@ -2762,7 +2680,7 @@ class ZakoApp(ctk.CTk):
             return
 
         self._monitor_stop.clear()
-        mode_label = "自动提交" if self._auto_mode else "手动确认"
+        mode_label = "数字自动 / 雷达确认" if self._auto_mode else "全部手动确认"
         self._set_monitor_status(f"签到监听运行中（{mode_label}），每 30 秒检查一次", SUCCESS)
         self._log(f"[monitor] started: {mode_label} mode")
 
@@ -2827,21 +2745,17 @@ class ZakoApp(ctk.CTk):
                                 event.get("time") or "待签到",
                                 "雷达签到",
                             )
-                            if self._auto_mode:
-                                self._auto_submit_radar_rollcall(course_name, rollcall_id)
-                            else:
-                                self._prompt_rollcall_confirmation({
-                                    "kind": "radar",
-                                    "course_id": course_id,
-                                    "course_name": course_name,
-                                    "rollcall_id": rollcall_id,
-                                    "time": event.get("time") or "待签到",
-                                })
+                            self._prompt_radar_rollcall_confirmation(
+                                course_name,
+                                rollcall_id,
+                                course_id,
+                                event.get("time") or "待签到",
+                            )
                         self._monitor_stop.wait(0.2)
 
                     if not self._monitor_stop.is_set():
                         stamp = datetime.now().strftime("%H:%M:%S")
-                        mode_tag = "自动" if self._auto_mode else "待确认"
+                        mode_tag = "数字自动" if self._auto_mode else "待确认"
                         self._set_monitor_status(
                             f"签到监听中 [{mode_tag}] | 数字: {number_count} | 雷达: {radar_count} | {stamp}", SUCCESS
                         )
@@ -2897,16 +2811,16 @@ class ZakoApp(ctk.CTk):
 
         def _toggle_auto_mode():
             self._auto_mode = not self._auto_mode
-            new_text = "🔁 自动签到" if self._auto_mode else "📋 手动签到"
+            new_text = "🔁 数字自动" if self._auto_mode else "📋 手动确认"
             auto_btn.configure(text=new_text)
             auto_btn.configure(fg_color=ACCENT if self._auto_mode else SURFACE2)
-            status_text = f"切换到{'自动' if self._auto_mode else '手动'}模式，运行中的监听将立即生效"
+            status_text = "数字签到将自动提交，雷达签到仍需现场确认" if self._auto_mode else "数字和雷达签到都将手动确认"
             if self._monitor_status_label:
                 self._monitor_status_label.configure(text=status_text)
-            self._log(f"[monitor] {'自动' if self._auto_mode else '手动'}签到模式")
+            self._log("[monitor] 数字自动 / 雷达确认模式" if self._auto_mode else "[monitor] 全部手动确认模式")
 
         auto_btn = ctk.CTkButton(
-            monitor_box, text="📋 手动签到", width=108, height=30,
+            monitor_box, text="📋 手动确认", width=108, height=30,
             fg_color=SURFACE2, hover_color=ACCENT_DK, text_color=TEXT_PRI,
             font=("Microsoft YaHei", 12), corner_radius=8,
             command=_toggle_auto_mode,
@@ -2927,7 +2841,7 @@ class ZakoApp(ctk.CTk):
         ).pack(side="left", padx=4, pady=8)
         self._monitor_status_label = ctk.CTkLabel(
             monitor_box,
-            text="签到监听未启动。点击「手动签到」切换为自动签到模式。",
+            text="签到监听未启动。可切换数字自动提交；雷达始终需要现场确认。",
             font=("Microsoft YaHei", 11), text_color=TEXT_SEC, anchor="w"
         )
         self._monitor_status_label.pack(side="left", fill="x", expand=True, padx=10)
@@ -3690,7 +3604,15 @@ class ZakoApp(ctk.CTk):
             locations = all_radar_locations(self._custom_radar_locations)
             if selected_loc not in locations:
                 selected_loc = None
-            self._log(f"📍 正在发送雷达签到 ({lat_v}, {lng_v}) ...")
+            ok = messagebox.askyesno(
+                "确认雷达签到",
+                f"课程：{course_name}\n坐标：{lat_v}, {lng_v}\n\n请确认本人已在现场，是否提交该位置？",
+                parent=self,
+            )
+            if not ok:
+                self._log("已取消雷达签到提交。")
+                return
+            self._log(f"📍 正在提交已确认的雷达位置 ({lat_v}, {lng_v}) ...")
 
             def _run():
                 return send_radar_rollcall(
@@ -3717,7 +3639,7 @@ class ZakoApp(ctk.CTk):
             run_sync_in_thread(_run, _on_done)
 
         make_button(
-            right, "🚀 发送雷达签到",
+            right, "🚀 现场确认并提交",
             command=_do_radar_sign,
             fg=SUCCESS, hover="#04B888",
             width=240, height=44, size=14
@@ -3725,7 +3647,7 @@ class ZakoApp(ctk.CTk):
 
         ctk.CTkLabel(
             right,
-            text="选中预设会自动填入坐标\n可输入名称并保存为自定义预设",
+            text="选中预设会自动填入坐标\n请仅在本人现场确认后提交\n可输入名称并保存为自定义预设",
             font=("Microsoft YaHei", 11),
             text_color=TEXT_SEC, wraplength=250, justify="center",
         ).pack(pady=(4, 10))
@@ -3744,7 +3666,7 @@ class ZakoApp(ctk.CTk):
         if success:
             ctk.CTkLabel(inner, text="🎉", font=("Segoe UI Emoji", 60)).pack()
             make_label(inner, "雷达签到成功喵❤！", size=22, bold=True, color=SUCCESS, anchor="center").pack(pady=(10, 4))
-            make_label(inner, "畅课平台已收到你的GPS位置", size=13, color=TEXT_SEC, anchor="center").pack()
+            make_label(inner, "畅课平台已收到你确认提交的 GPS 位置", size=13, color=TEXT_SEC, anchor="center").pack()
         else:
             ctk.CTkLabel(inner, text="!", font=("Microsoft YaHei", 52, "bold"), text_color=DANGER).pack()
             make_label(inner, "雷达签到失败", size=22, bold=True, color=DANGER, anchor="center").pack(pady=(10, 4))
