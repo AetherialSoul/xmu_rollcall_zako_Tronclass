@@ -69,8 +69,45 @@ HEADERS_BASE = {
         "Chrome/147.0.0.0 Safari/537.36"
     ),
 }
-ACTIVE_NUMBER_STATUSES = {"active", "in_progress", "on_call", "ongoing"}
-FINISHED_NUMBER_STATUSES = {"finished", "closed", "ended", "expired"}
+ACTIVE_NUMBER_STATUSES = {"absent"}
+FINISHED_NUMBER_STATUSES = {"finished", "closed", "ended", "expired", "on_call_fine", "signed", "submitted", "present"}
+SIGNED_ROLLCALL_STATUSES = {"on_call_fine", "signed", "submitted", "present"}
+
+
+def parse_lnt_timestamp(value):
+    if not value:
+        return 0
+    try:
+        raw = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0
+
+
+
+def find_nested_value(data, keys, depth=0, max_depth=8):
+    if depth > max_depth:
+        return None
+    if isinstance(keys, str):
+        keys = (keys,)
+    if isinstance(data, dict):
+        for key in keys:
+            value = data.get(key)
+            if value not in (None, ""):
+                return value
+        for value in data.values():
+            found = find_nested_value(value, keys, depth + 1, max_depth)
+            if found not in (None, ""):
+                return found
+    elif isinstance(data, list):
+        for item in data:
+            found = find_nested_value(item, keys, depth + 1, max_depth)
+            if found not in (None, ""):
+                return found
+    return None
 
 # ==============================================================================
 # 后端逻辑（完美继承原有机制，仅增加 log 参数用于重定向输出到 UI）
@@ -697,7 +734,7 @@ def get_courses(cookie, s_id, y_id, log=print):
         "page_size": 30,
         "showScorePassedStatus": False,
     }
-    resp = requests.post(f"{BASE_URL}/api/my-courses", headers=headers, json=payload)
+    resp = requests.post(f"{BASE_URL}/api/my-courses", headers=headers, json=payload, timeout=15)
     try:
         data = resp.json()
     except Exception:
@@ -729,34 +766,41 @@ def get_latest_rollcall_id(course_id, cookie, student_id):
         f"{BASE_URL}/api/course/{course_id}"
         f"/student/{student_id}/rollcalls?page=1&page_size=99"
     )
-    resp = requests.get(url, headers=headers)
+    resp = requests.get(url, headers=headers, timeout=12)
     data = resp.json()
 
     if isinstance(data, list):
         rollcalls = data
-    elif "rollcalls" in data:
+    elif isinstance(data, dict) and "rollcalls" in data:
         rollcalls = data["rollcalls"]
-    elif "data" in data:
+    elif isinstance(data, dict) and "data" in data:
         rollcalls = data["data"]
     else:
         rollcalls = []
 
     if not rollcalls:
         return None, None
-    latest = rollcalls[-1]
+    latest = max(
+        rollcalls,
+        key=lambda item: parse_lnt_timestamp(
+            item.get("rollcall_time") or item.get("created_at") or item.get("start_time") or item.get("updated_at")
+        ),
+    )
     return (
         latest.get("id") or latest.get("rollcall_id"),
-        latest.get("rollcall_time") or latest.get("created_at"),
+        latest.get("rollcall_time") or latest.get("created_at") or latest.get("start_time"),
     )
 
 
 def get_number_code(rollcall_id, cookie):
     headers = {**HEADERS_BASE, "cookie": cookie}
     url  = f"{BASE_URL}/api/rollcall/{rollcall_id}/student_rollcalls"
-    resp = requests.get(url, headers=headers)
+    resp = requests.get(url, headers=headers, timeout=12)
     data = resp.json()
-    status = str(data.get("status") or "").lower()
-    return data.get("number_code"), status, data.get("end_time")
+    status = str(find_nested_value(data, ("status", "rollcall_status")) or "").lower()
+    code = find_nested_value(data, ("number_code", "numberCode"))
+    end_time = find_nested_value(data, ("end_time", "endTime", "ended_at", "end_at"))
+    return code, status, end_time
 
 
 def is_number_rollcall_active(status):
@@ -765,6 +809,58 @@ def is_number_rollcall_active(status):
 
 def is_number_rollcall_finished(status):
     return str(status or "").lower() in FINISHED_NUMBER_STATUSES
+
+
+def normalize_rollcall_event(rollcall):
+    if not isinstance(rollcall, dict):
+        return None
+    rollcall_id = rollcall.get("rollcall_id") or rollcall.get("id")
+    if not rollcall_id:
+        return None
+    course_id = rollcall.get("course_id") or rollcall.get("courseId") or "-"
+    status = str(rollcall.get("status") or "").lower()
+    rollcall_status = str(rollcall.get("rollcall_status") or "").lower()
+    return {
+        "raw": rollcall,
+        "rollcall_id": rollcall_id,
+        "course_id": course_id,
+        "course_name": rollcall.get("course_title") or rollcall.get("course_name") or str(course_id),
+        "is_number": bool(rollcall.get("is_number")),
+        "is_radar": bool(rollcall.get("is_radar")),
+        "is_expired": bool(rollcall.get("is_expired")),
+        "status": status,
+        "rollcall_status": rollcall_status,
+        "time": rollcall.get("created_at") or rollcall.get("rollcall_time") or rollcall.get("start_time") or "待签到",
+    }
+
+
+def is_active_number_event(event):
+    if not event or not event.get("is_number") or event.get("is_radar"):
+        return False
+    if event.get("is_expired"):
+        return False
+    status = str(event.get("status") or "").lower()
+    rollcall_status = str(event.get("rollcall_status") or "").lower()
+    if status in SIGNED_ROLLCALL_STATUSES or rollcall_status in FINISHED_NUMBER_STATUSES:
+        return False
+    return is_number_rollcall_active(status)
+
+
+def is_active_radar_event(event):
+    if not event or not event.get("is_radar"):
+        return False
+    if event.get("is_expired"):
+        return False
+    status = str(event.get("status") or "").lower()
+    return status == "absent"
+
+
+def get_active_rollcall_events(cookie, log=print):
+    return [
+        event for event in (normalize_rollcall_event(item) for item in get_radar_rollcalls(cookie, log))
+        if event and (is_active_number_event(event) or is_active_radar_event(event))
+    ]
+
 
 def get_radar_rollcalls(cookie, log=print):
     data = lnt_get_json(cookie, "/api/radar/rollcalls?api_version=1.1.0", log)
@@ -1423,8 +1519,9 @@ def load_custom_radar_locations(log=print):
 
 
 def save_custom_radar_locations(locations, log=print):
-    data = {name: [lat, lng] for name, (lat, lng) in locations.items()}
+    data = {str(name): [float(lat), float(lng)] for name, (lat, lng) in locations.items()}
     try:
+        CUSTOM_RADAR_LOCATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with CUSTOM_RADAR_LOCATIONS_FILE.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         return True
@@ -2671,88 +2768,82 @@ class ZakoApp(ctk.CTk):
 
         def _loop():
             while not self._monitor_stop.is_set():
-                active_count = 0
+                number_count = 0
                 radar_count = 0
                 try:
-                    for course in list(self._courses):
+                    try:
+                        events = get_active_rollcall_events(self._cookie, self._log)
+                    except Exception as exc:
+                        self._log(f"[monitor] active rollcall check failed: {exc}")
+                        events = []
+
+                    for event in events:
                         if self._monitor_stop.is_set():
                             break
-                        course_id = course.get("id")
-                        course_name = course.get("display_name") or course.get("name") or str(course_id)
-                        if not course_id:
-                            continue
-                        try:
-                            rollcall_id, rollcall_time = get_latest_rollcall_id(
-                                course_id, self._cookie, self._student_id
-                            )
-                            if not rollcall_id:
-                                continue
-                            number_code, status, _ = get_number_code(rollcall_id, self._cookie)
-                            key = f"number:{course_id}:{rollcall_id}"
-                            if is_number_rollcall_active(status):
-                                active_count += 1
-                                if key not in self._monitor_seen:
-                                    self._monitor_seen.add(key)
-                                    self._notify_rollcall(course_name, number_code, rollcall_time, "数字签到")
-                                    if self._auto_mode:
-                                        self._auto_submit_number_rollcall(course_name, rollcall_id, number_code)
-                                    else:
-                                        self._prompt_rollcall_confirmation({
-                                            "kind": "number",
-                                            "course_id": course_id,
-                                            "course_name": course_name,
-                                            "rollcall_id": rollcall_id,
-                                            "number_code": number_code,
-                                            "time": rollcall_time,
-                                        })
-                            elif key not in self._monitor_seen and is_number_rollcall_finished(status):
-                                self._monitor_seen.add(key)
-                        except Exception as exc:
-                            self._log(f"[monitor] {course_name} number check failed: {exc}")
-                        self._monitor_stop.wait(0.2)
+                        kind = "radar" if event.get("is_radar") else "number"
+                        course_id = event.get("course_id") or "-"
+                        course_name = event.get("course_name") or str(course_id)
+                        rollcall_id = event.get("rollcall_id")
+                        key = f"{kind}:{course_id}:{rollcall_id}"
+                        if kind == "radar":
+                            radar_count += 1
+                        else:
+                            number_count += 1
 
-                    try:
-                        for rollcall in get_radar_rollcalls(self._cookie, self._log):
-                            if self._monitor_stop.is_set():
-                                break
-                            if not rollcall.get("is_radar"):
+                        if key in self._monitor_seen:
+                            continue
+
+                        if kind == "number":
+                            try:
+                                number_code, status, _ = get_number_code(rollcall_id, self._cookie)
+                            except Exception as exc:
+                                self._log(f"[monitor] {course_name} number code fetch failed: {exc}")
                                 continue
-                            rollcall_id = rollcall.get("rollcall_id") or rollcall.get("id")
-                            course_id = rollcall.get("course_id") or "-"
-                            course_name = rollcall.get("course_title") or str(course_id)
-                            status = str(rollcall.get("status") or "").lower()
-                            key = f"radar:{course_id}:{rollcall_id}"
-                            if status == "absent":
-                                radar_count += 1
-                                active_count += 1
-                                if key not in self._monitor_seen:
-                                    self._monitor_seen.add(key)
-                                    self._notify_rollcall(
-                                        course_name,
-                                        f"雷达点名 ID {rollcall_id}",
-                                        "待签到",
-                                        "雷达签到",
-                                    )
-                                    if self._auto_mode:
-                                        self._auto_submit_radar_rollcall(course_name, rollcall_id)
-                                    else:
-                                        self._prompt_rollcall_confirmation({
-                                            "kind": "radar",
-                                            "course_id": course_id,
-                                            "course_name": course_name,
-                                            "rollcall_id": rollcall_id,
-                                            "time": "待签到",
-                                        })
-                            elif status == "on_call_fine" and key not in self._monitor_seen:
-                                self._monitor_seen.add(key)
-                    except Exception as exc:
-                        self._log(f"[monitor] radar rollcall check failed: {exc}")
+                            if not number_code:
+                                self._log(f"[monitor] 跳过疑似数字签到：{course_name} 没有返回 number_code。")
+                                continue
+                            if status and not is_number_rollcall_active(status):
+                                self._log(f"[monitor] 跳过数字签到：{course_name} 当前状态为 {status}。")
+                                continue
+
+                            self._monitor_seen.add(key)
+                            self._notify_rollcall(course_name, number_code, event.get("time"), "数字签到")
+                            if self._auto_mode:
+                                self._auto_submit_number_rollcall(course_name, rollcall_id, number_code)
+                            else:
+                                self._prompt_rollcall_confirmation({
+                                    "kind": "number",
+                                    "course_id": course_id,
+                                    "course_name": course_name,
+                                    "rollcall_id": rollcall_id,
+                                    "number_code": number_code,
+                                    "time": event.get("time"),
+                                })
+                        else:
+                            self._monitor_seen.add(key)
+                            self._notify_rollcall(
+                                course_name,
+                                f"雷达点名 ID {rollcall_id}",
+                                event.get("time") or "待签到",
+                                "雷达签到",
+                            )
+                            if self._auto_mode:
+                                self._auto_submit_radar_rollcall(course_name, rollcall_id)
+                            else:
+                                self._prompt_rollcall_confirmation({
+                                    "kind": "radar",
+                                    "course_id": course_id,
+                                    "course_name": course_name,
+                                    "rollcall_id": rollcall_id,
+                                    "time": event.get("time") or "待签到",
+                                })
+                        self._monitor_stop.wait(0.2)
 
                     if not self._monitor_stop.is_set():
                         stamp = datetime.now().strftime("%H:%M:%S")
                         mode_tag = "自动" if self._auto_mode else "待确认"
                         self._set_monitor_status(
-                            f"签到监听中 [{mode_tag}] | 数字: {active_count - radar_count} | 雷达: {radar_count} | {stamp}", SUCCESS
+                            f"签到监听中 [{mode_tag}] | 数字: {number_count} | 雷达: {radar_count} | {stamp}", SUCCESS
                         )
                 except Exception as exc:
                     self._log(f"[monitor] loop error: {exc}")
@@ -2761,7 +2852,6 @@ class ZakoApp(ctk.CTk):
 
             self._set_monitor_status("签到监听已停止", TEXT_SEC)
             self._log("[monitor] stopped")
-
         self._monitor_thread = threading.Thread(target=_loop, daemon=True)
         self._monitor_thread.start()
     def _stop_rollcall_monitor(self):
@@ -2866,22 +2956,28 @@ class ZakoApp(ctk.CTk):
 
         info = ctk.CTkFrame(row, fg_color="transparent")
         info.pack(side="left", fill="x", expand=True, pady=10)
-        ctk.CTkLabel(
+        name_label = ctk.CTkLabel(
             info, text=name,
             font=("Microsoft YaHei", 13, "bold"),
             text_color=TEXT_PRI, anchor="w"
-        ).pack(anchor="w")
-        ctk.CTkLabel(
+        )
+        name_label.pack(anchor="w")
+        id_label = ctk.CTkLabel(
             info, text=f"ID: {cid}",
             font=("Courier New", 11),
             text_color=TEXT_SEC, anchor="w"
-        ).pack(anchor="w")
+        )
+        id_label.pack(anchor="w")
 
         arrow = ctk.CTkLabel(row, text="›", font=("Arial", 22), text_color=TEXT_SEC)
         arrow.pack(side="right", padx=12)
 
         # 点击整行进入结果页
         def on_click(e, _cid=cid, _name=name):
+            if getattr(self, "_course_click_pending", False):
+                return
+            self._course_click_pending = True
+            self.after(700, lambda: setattr(self, "_course_click_pending", False))
             self._show_code(_cid, _name)
 
         def on_enter(e):
@@ -2889,7 +2985,7 @@ class ZakoApp(ctk.CTk):
         def on_leave(e):
             row.configure(fg_color=SURFACE)
 
-        for w in (row, icon, info, arrow):
+        for w in (row, icon, info, name_label, id_label, arrow):
             w.bind("<Button-1>", on_click)
             w.bind("<Enter>",    on_enter)
             w.bind("<Leave>",    on_leave)
@@ -3167,6 +3263,8 @@ class ZakoApp(ctk.CTk):
     # 第 3 页：签到码结果
     # =======================================================
     def _show_code(self, course_id, course_name):
+        self._current_code_request = uuid.uuid4().hex
+        request_id = self._current_code_request
         self._clear_content()
         f = self._content
 
@@ -3213,6 +3311,8 @@ class ZakoApp(ctk.CTk):
             return {"code": number_code, "status": status, "time": time_str, "rid": r_id}
 
         def on_result(result, err):
+            if request_id != getattr(self, "_current_code_request", None):
+                return
             if err:
                 self._log(f"❌ 查询出错: {err}")
                 self.after(0, self._show_result_card, None, course_id, course_name)
@@ -3533,9 +3633,9 @@ class ZakoApp(ctk.CTk):
             if not save_custom_radar_locations(next_locations, self._log):
                 return
             self._custom_radar_locations = next_locations
-            self._radar_selected_loc.set(name)
             _render_location_rows()
-            self._log(f"✅ 已保存自定义雷达预设：{name} ({lat_v}, {lng_v})")
+            self._radar_selected_loc.set(name)
+            self._log(f"✅ 已保存自定义雷达预设：{name} ({lat_v}, {lng_v}) -> {CUSTOM_RADAR_LOCATIONS_FILE}")
 
         def _delete_custom_preset(name):
             if name not in self._custom_radar_locations:
