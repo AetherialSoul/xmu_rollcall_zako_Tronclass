@@ -27,6 +27,7 @@ import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
 from playwright.async_api import async_playwright
+from playwright.sync_api import sync_playwright
 from datetime import datetime, timezone, timedelta
 from email.header import Header
 from email.mime.text import MIMEText
@@ -52,6 +53,7 @@ APP_DIR = Path(__file__).resolve().parent
 LOGIN_STATE_DIR = APP_DIR / ".zako_browser_profile"
 CUSTOM_RADAR_LOCATIONS_FILE = APP_DIR / "custom_radar_locations.json"
 ACCOUNT_CONFIG_FILE = APP_DIR / "account.local.json"
+LNT_CACHE_FILE = APP_DIR / "lnt_session_cache.json"
 INTEGRATIONS_DIR = APP_DIR / "integrations"
 SCORE_PROJECT_DIR = INTEGRATIONS_DIR / "score_query"
 IQA_PROJECT_DIR = INTEGRATIONS_DIR / "iqa_helper"
@@ -69,9 +71,10 @@ HEADERS_BASE = {
         "Chrome/147.0.0.0 Safari/537.36"
     ),
 }
-ACTIVE_NUMBER_STATUSES = {"absent"}
-FINISHED_NUMBER_STATUSES = {"finished", "closed", "ended", "expired", "on_call_fine", "signed", "submitted", "present"}
-SIGNED_ROLLCALL_STATUSES = {"on_call_fine", "signed", "submitted", "present"}
+ACTIVE_NUMBER_STATUSES = {"absent", "active", "in_progress", "on_call", "ongoing"}
+FINISHED_NUMBER_STATUSES = {"finished", "closed", "ended", "expired", "signed", "submitted", "present"}
+SIGNED_ROLLCALL_STATUSES = {"signed", "submitted", "present"}
+LNT_CACHE_TTL = 6 * 60 * 60
 
 
 def parse_lnt_timestamp(value):
@@ -237,6 +240,96 @@ def load_account_data(log=print):
         return {}
 
 
+def load_lnt_cache(log=print):
+    if not LNT_CACHE_FILE.exists():
+        return {}
+    try:
+        data = json.loads(LNT_CACHE_FILE.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        log(f"⚠️ 教学平台缓存读取失败: {exc}")
+        return {}
+
+
+def save_lnt_cache(data, log=print):
+    try:
+        LNT_CACHE_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log(f"⚠️ 教学平台缓存保存失败: {exc}")
+
+
+def get_cached_lnt_session(max_age=LNT_CACHE_TTL, log=print):
+    cache = load_lnt_cache(log)
+    if not cache:
+        return None
+    current_username = str(load_account_data(lambda _msg: None).get("username") or "").strip()
+    cached_username = str(cache.get("username") or "").strip()
+    if current_username and cached_username and current_username != cached_username:
+        return None
+    try:
+        saved_at = float(cache.get("saved_at") or 0)
+    except Exception:
+        saved_at = 0
+    if max_age is not None and time.time() - saved_at > max_age:
+        return None
+    student_id = cache.get("student_id")
+    semester_id = cache.get("semester_id")
+    academic_year_id = cache.get("academic_year_id")
+    courses = cache.get("courses")
+    if not student_id or not semester_id or not academic_year_id or not isinstance(courses, list) or not courses:
+        return None
+    return {
+        "student_id": student_id,
+        "semester_id": str(semester_id),
+        "academic_year_id": str(academic_year_id),
+        "courses": courses,
+        "cookie": str(cache.get("cookie") or ""),
+        "saved_at": saved_at,
+    }
+
+
+def get_any_cached_lnt_session(log=print):
+    return get_cached_lnt_session(max_age=None, log=log)
+
+
+def compact_course_list(courses):
+    compacted = []
+    seen = set()
+    for course in courses or []:
+        if not isinstance(course, dict):
+            continue
+        cid = course.get("id")
+        if cid in seen:
+            continue
+        seen.add(cid)
+        compacted.append({
+            "id": cid,
+            "name": course.get("name") or course.get("display_name") or "未知课程",
+            "display_name": course.get("display_name") or course.get("name") or "未知课程",
+        })
+    return compacted
+
+
+def update_lnt_session_cache(student_id, semester_id, academic_year_id, courses, log=print, cookie=None):
+    cache = load_lnt_cache(log)
+    username = str(load_account_data(lambda _msg: None).get("username") or "").strip()
+    cache.pop("rollcall", None)
+    cache.update({
+        "username": username,
+        "student_id": student_id,
+        "semester_id": str(semester_id),
+        "academic_year_id": str(academic_year_id),
+        "courses": compact_course_list(courses),
+        "saved_at": time.time(),
+    })
+    if cookie is not None:
+        cache["cookie"] = str(cookie or "")
+    save_lnt_cache(cache, log)
+
+
 def get_login_method():
     data = load_account_data(lambda _msg: None)
     if data.get("login_method") in ("browser", "account"):
@@ -260,12 +353,12 @@ def _split_line_newline(line):
 
 def _replace_yaml_line_value(line, key, value):
     body, newline = _split_line_newline(line)
-    pattern = rf"^(\s*{re.escape(key)}\s*:\s*)(.*?)(\s+#.*)?$"
+    pattern = rf"^(\s*{re.escape(key)}\s*):\s*(.*?)(\s+#.*)?$"
     match = re.match(pattern, body)
     if not match:
         return line
     comment = match.group(3) or ""
-    return f"{match.group(1)}{yaml_format_scalar(value)}{comment}{newline}"
+    return f"{match.group(1)}: {yaml_format_scalar(value)}{comment}{newline}"
 
 
 def yaml_get_root_scalar(text, key, default=""):
@@ -590,8 +683,82 @@ def get_current_semester_info(cookie, log=print):
     return "29", "12"
 
 
+def extract_course_list(data, log=print):
+    if isinstance(data, list):
+        courses = data
+    elif isinstance(data, dict) and "courses" in data:
+        courses = data["courses"]
+    elif isinstance(data, dict) and "data" in data:
+        courses = data["data"]
+    else:
+        log("⚠️ 无法解析课程列表喵呜~")
+        return []
+
+    seen, unique = set(), []
+    for course in courses:
+        if not isinstance(course, dict):
+            continue
+        cid = course.get("id")
+        if cid not in seen:
+            seen.add(cid)
+            unique.append(course)
+    return unique
+
+
+def get_cached_browser_cookie(log=print):
+    if not LOGIN_STATE_DIR.exists():
+        return ""
+    errors = []
+    with sync_playwright() as p:
+        for channel in ("msedge", "chrome", None):
+            context = None
+            try:
+                kwargs = {
+                    "user_data_dir": str(LOGIN_STATE_DIR),
+                    "headless": True,
+                }
+                if channel:
+                    kwargs["channel"] = channel
+                context = p.chromium.launch_persistent_context(**kwargs)
+                cookies = context.cookies()
+                lnt_cookies = [c for c in cookies if "lnt.xmu.edu.cn" in c.get("domain", "")]
+                return "; ".join(f"{c['name']}={c['value']}" for c in lnt_cookies)
+            except Exception as exc:
+                errors.append(f"{channel or 'chromium'}: {exc}")
+            finally:
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+    log("⚠️ 快速读取教学平台 Cookie 失败，改用浏览器登录流程: " + " | ".join(errors[-2:]))
+    return ""
+
+
+def verify_lnt_cookie(cookie, log=print):
+    if not cookie:
+        return False
+    try:
+        resp = requests.get(
+            f"{BASE_URL}/api/radar/rollcalls?api_version=1.1.0",
+            headers={**HEADERS_BASE, "cookie": cookie},
+            timeout=4,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def make_lnt_session(cookie):
+    session = requests.Session()
+    session.headers.update({**HEADERS_BASE, "cookie": cookie})
+    return session
+
+
 async def login_and_get_cookie(log=print, login_method=None):
     log("❤ 正在打开浏览器喵 ❤，连接厦大CAS畅课登录系统喵❤")
+    cached = get_any_cached_lnt_session(log=log)
+    cached_student_id = cached.get("student_id") if cached else None
     async with async_playwright() as p:
         context = None
         page = None
@@ -628,7 +795,7 @@ async def login_and_get_cookie(log=print, login_method=None):
                 return None, None # 直接终结流程
         
         page = context.pages[0] if context.pages else await context.new_page()
-        student_id = None
+        student_id = cached_student_id
 
         def handle_request(request):
             nonlocal student_id
@@ -639,12 +806,12 @@ async def login_and_get_cookie(log=print, login_method=None):
                     log(f"✅ 找到主人真实学生ID了喵❤：{student_id}")
 
         page.on("request", handle_request)
-        await page.goto(BASE_URL)
+        await page.goto(BASE_URL, wait_until="commit", timeout=8000)
 
         if "ids.xmu.edu.cn" in page.url:
             login_method = normalize_login_method(login_method or get_login_method())
             if login_method == "account":
-                await page.goto(build_ids_username_login_url(page.url, BASE_URL), wait_until="domcontentloaded")
+                await page.goto(build_ids_username_login_url(page.url, BASE_URL), wait_until="commit", timeout=8000)
                 await auto_login_cas_page(page, log)
                 log("👉 已尝试账号密码自动登录；如未自动跳转，请在浏览器中手动完成统一认证。")
             else:
@@ -657,15 +824,14 @@ async def login_and_get_cookie(log=print, login_method=None):
 
         try:
             await page.wait_for_url(
-                "**/lnt.xmu.edu.cn/**", timeout=15000, wait_until="commit"
+                "**/lnt.xmu.edu.cn/**", timeout=5000, wait_until="commit"
             )
-            log("⚡ 票据交接完成！不等主页加载，直接开始截胡喵！")
-            await asyncio.sleep(1)
+            log("⚡ 票据交接完成，直接提取登录态。")
         except Exception:
-            log("⚠️ zako网络稍慢喵，跳过等待直接进入提取流程喵...")
+            log("⚠️ 页面跳转稍慢，跳过等待直接提取登录态。")
 
         if student_id is None:
-            log("🚀 喵要空降连招❤：后台拉取课程并强制跳转...")
+            log("🚀 正在通过课程签到页识别学生ID...")
             try:
                 cookies_tmp = await context.cookies()
                 cookie_str_tmp = "; ".join(
@@ -694,9 +860,9 @@ async def login_and_get_cookie(log=print, login_method=None):
                 courses_tmp = data_tmp.get("courses", data_tmp.get("data", []))
                 if courses_tmp:
                     first_id = courses_tmp[0]["id"]
-                    log(f"👉 后台秒定课程ID {first_id}喵，正在控制浏览器直接跳走喵！")
-                    await page.goto(f"{BASE_URL}/course/{first_id}/rollcall")
-                    for _ in range(15):
+                    log(f"👉 用课程 {first_id} 触发学生ID识别。")
+                    await page.goto(f"{BASE_URL}/course/{first_id}/rollcall", wait_until="commit", timeout=8000)
+                    for _ in range(5):
                         if student_id is not None:
                             break
                         await asyncio.sleep(1)
@@ -734,39 +900,29 @@ def get_courses(cookie, s_id, y_id, log=print):
         "page_size": 30,
         "showScorePassedStatus": False,
     }
-    resp = requests.post(f"{BASE_URL}/api/my-courses", headers=headers, json=payload, timeout=15)
+    resp = requests.post(f"{BASE_URL}/api/my-courses", headers=headers, json=payload, timeout=10)
+    if resp.status_code in (401, 403):
+        raise RuntimeError("教学平台登录状态已失效，请重新进入教学平台。")
+    resp.raise_for_status()
     try:
         data = resp.json()
     except Exception:
         log(f"⚠️ 返回数据解析失败: {resp.text}")
         return []
-
-    if isinstance(data, list):
-        courses = data
-    elif "courses" in data:
-        courses = data["courses"]
-    elif "data" in data:
-        courses = data["data"]
-    else:
-        log("⚠️ 无法解析课程列表喵呜~")
-        return []
-
-    seen, unique = set(), []
-    for c in courses:
-        cid = c.get("id")
-        if cid not in seen:
-            seen.add(cid)
-            unique.append(c)
-    return unique
+    return extract_course_list(data, log)
 
 
-def get_latest_rollcall_id(course_id, cookie, student_id):
+def get_latest_rollcall_id(course_id, cookie, student_id, session=None):
     headers = {**HEADERS_BASE, "cookie": cookie}
     url  = (
         f"{BASE_URL}/api/course/{course_id}"
-        f"/student/{student_id}/rollcalls?page=1&page_size=99"
+        f"/student/{student_id}/rollcalls?page=1&page_size=10"
     )
-    resp = requests.get(url, headers=headers, timeout=12)
+    client = session or requests
+    resp = client.get(url, headers=headers, timeout=8)
+    if resp.status_code in (401, 403):
+        raise RuntimeError("教学平台登录状态已失效，请重新进入教学平台。")
+    resp.raise_for_status()
     data = resp.json()
 
     if isinstance(data, list):
@@ -792,15 +948,58 @@ def get_latest_rollcall_id(course_id, cookie, student_id):
     )
 
 
-def get_number_code(rollcall_id, cookie):
+def get_number_code(rollcall_id, cookie, session=None):
     headers = {**HEADERS_BASE, "cookie": cookie}
     url  = f"{BASE_URL}/api/rollcall/{rollcall_id}/student_rollcalls"
-    resp = requests.get(url, headers=headers, timeout=12)
+    client = session or requests
+    resp = client.get(url, headers=headers, timeout=8)
+    if resp.status_code in (401, 403):
+        raise RuntimeError("教学平台登录状态已失效，请重新进入教学平台。")
+    resp.raise_for_status()
     data = resp.json()
     status = str(find_nested_value(data, ("status", "rollcall_status")) or "").lower()
     code = find_nested_value(data, ("number_code", "numberCode"))
     end_time = find_nested_value(data, ("end_time", "endTime", "ended_at", "end_at"))
     return code, status, end_time
+
+
+def get_rollcall_detail(rollcall_id, cookie, session=None):
+    headers = {**HEADERS_BASE, "cookie": cookie}
+    url = f"{BASE_URL}/api/rollcall/{rollcall_id}/student_rollcalls"
+    client = session or requests
+    resp = client.get(url, headers=headers, timeout=8)
+    if resp.status_code in (401, 403):
+        raise RuntimeError("教学平台登录状态已失效，请重新进入教学平台。")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_latest_rollcall_result(course_id, cookie, student_id, session=None):
+    owns_session = session is None
+    session = session or make_lnt_session(cookie)
+    try:
+        r_id, r_time = get_latest_rollcall_id(course_id, cookie, student_id, session=session)
+        if not r_id:
+            return None
+        detail = get_rollcall_detail(r_id, cookie, session=session)
+        status = str(find_nested_value(detail, ("status", "rollcall_status")) or "").lower()
+        number_code = find_nested_value(detail, ("number_code", "numberCode"))
+        try:
+            dt = datetime.fromisoformat(str(r_time).replace("Z", "+00:00"))
+            time_str = dt.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            time_str = str(r_time)
+        return {
+            "code": number_code,
+            "status": status,
+            "time": time_str,
+            "rid": r_id,
+            "is_number": bool(detail.get("is_number")),
+            "is_radar": bool(detail.get("is_radar")),
+        }
+    finally:
+        if owns_session:
+            session.close()
 
 
 def is_number_rollcall_active(status):
@@ -841,7 +1040,9 @@ def is_active_number_event(event):
         return False
     status = str(event.get("status") or "").lower()
     rollcall_status = str(event.get("rollcall_status") or "").lower()
-    if status in SIGNED_ROLLCALL_STATUSES or rollcall_status in FINISHED_NUMBER_STATUSES:
+    if rollcall_status in ACTIVE_NUMBER_STATUSES:
+        return True
+    if rollcall_status in FINISHED_NUMBER_STATUSES or status in SIGNED_ROLLCALL_STATUSES:
         return False
     return is_number_rollcall_active(status)
 
@@ -855,15 +1056,38 @@ def is_active_radar_event(event):
     return status == "absent"
 
 
-def get_active_rollcall_events(cookie, log=print):
+def get_active_rollcall_events(cookie, log=print, timeout=15, session=None):
     return [
-        event for event in (normalize_rollcall_event(item) for item in get_radar_rollcalls(cookie, log))
+        event for event in (normalize_rollcall_event(item) for item in get_radar_rollcalls(cookie, log, timeout, session))
         if event and (is_active_number_event(event) or is_active_radar_event(event))
     ]
 
 
-def get_radar_rollcalls(cookie, log=print):
-    data = lnt_get_json(cookie, "/api/radar/rollcalls?api_version=1.1.0", log)
+def _same_lnt_id(left, right):
+    return str(left or "").strip() == str(right or "").strip()
+
+
+def get_live_active_rollcall_id(course_id, cookie, log=print, session=None):
+    try:
+        events = get_active_rollcall_events(cookie, log, timeout=2, session=session)
+    except Exception as exc:
+        log(f"⚠️ 活跃签到接口查询失败，改用课程历史接口: {exc}")
+        return None, None
+    fallback = None
+    for event in events:
+        if not _same_lnt_id(event.get("course_id"), course_id):
+            continue
+        if event.get("is_number"):
+            return event.get("rollcall_id"), event.get("time")
+        if fallback is None:
+            fallback = event
+    if fallback:
+        return fallback.get("rollcall_id"), fallback.get("time")
+    return None, None
+
+
+def get_radar_rollcalls(cookie, log=print, timeout=15, session=None):
+    data = lnt_get_json(cookie, "/api/radar/rollcalls?api_version=1.1.0", log, timeout=timeout, session=session)
     return _extract_lnt_list(data, "rollcalls")
 def _parse_notify_scalar(value):
     value = str(value).strip()
@@ -1063,9 +1287,10 @@ def _lnt_headers(cookie):
     }
 
 
-def lnt_get_json(cookie, api_path, log=print):
+def lnt_get_json(cookie, api_path, log=print, timeout=15, session=None):
     url = api_path if str(api_path).startswith("http") else f"{BASE_URL}{api_path}"
-    resp = requests.get(url, headers=_lnt_headers(cookie), timeout=15)
+    client = session or requests
+    resp = client.get(url, headers=_lnt_headers(cookie), timeout=timeout)
     if resp.status_code in (401, 403):
         raise RuntimeError("登录状态可能已过期，请回到主页重新登录后再试。")
     if resp.status_code >= 400:
@@ -1912,6 +2137,8 @@ class ZakoApp(ctk.CTk):
         self._cookie     = None
         self._student_id = None
         self._courses    = []
+        self._lnt_session = None
+        self._lnt_session_lock = threading.Lock()
         self._busy       = False        # 防止重复点击
         self._monitor_thread = None
         self._monitor_stop = threading.Event()
@@ -1936,6 +2163,7 @@ class ZakoApp(ctk.CTk):
 
         # ── 初始页面 ──────────────────────────────────
         self._custom_radar_locations = load_custom_radar_locations(self._log)
+        self._prime_cached_lnt_session()
         self._show_home()
 
     # ─────────────────────────────────────────────────────
@@ -1998,6 +2226,45 @@ class ZakoApp(ctk.CTk):
         self._log_text.see("end")
         self._log_text.configure(state="disabled")
 
+    def _reset_lnt_session(self):
+        session = getattr(self, "_lnt_session", None)
+        self._lnt_session = None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    def _set_lnt_cookie(self, cookie):
+        cookie = str(cookie or "")
+        if cookie != str(self._cookie or ""):
+            self._reset_lnt_session()
+        self._cookie = cookie
+        if cookie and self._lnt_session is None:
+            self._lnt_session = make_lnt_session(cookie)
+
+    def _prime_cached_lnt_session(self):
+        cached = get_any_cached_lnt_session(log=lambda _msg: None)
+        if not cached:
+            return
+        self._set_lnt_cookie(cached.get("cookie") or "")
+        self._warm_lnt_session()
+
+    def _warm_lnt_session(self):
+        if not self._cookie:
+            return
+        session = self._lnt_session or make_lnt_session(self._cookie)
+        self._lnt_session = session
+
+        def warm():
+            try:
+                with self._lnt_session_lock:
+                    get_radar_rollcalls(self._cookie, lambda _msg: None, timeout=12, session=session)
+            except Exception:
+                pass
+
+        run_sync_in_thread(warm, lambda _result, _err: None)
+
     def _terminate_process_tree(self, proc, name="子进程"):
         if not proc or proc.poll() is not None:
             return
@@ -2021,6 +2288,7 @@ class ZakoApp(ctk.CTk):
         self._monitor_stop.set()
         self._terminate_process_tree(self._score_process, "成绩查询")
         self._score_process = None
+        self._reset_lnt_session()
 
     def _on_close(self):
         self._cleanup_child_processes()
@@ -2484,7 +2752,105 @@ class ZakoApp(ctk.CTk):
             self._log("✅ 已复用当前教学平台登录状态，直接返回课程页。")
             self._show_courses()
             return
+        cached = get_any_cached_lnt_session(log=self._log)
+        if cached:
+            self._set_lnt_cookie(cached.get("cookie") or "")
+            self._student_id = cached["student_id"]
+            self._courses = cached["courses"]
+            self._monitor_seen.clear()
+            self._log("⚡ 已使用教学平台缓存直接进入课程页；后台校验登录态。")
+            self._set_home_status("已使用教学平台缓存。", SUCCESS)
+            self._show_courses()
+            self._warm_lnt_session()
+
+            def verify_cached_login():
+                cookie = cached.get("cookie") or ""
+                verified = verify_lnt_cookie(cookie, self._log)
+                if not verified:
+                    cookie = get_cached_browser_cookie(self._log)
+                    verified = verify_lnt_cookie(cookie, self._log)
+                if not verified:
+                    return None
+                return cookie, cached["semester_id"], cached["academic_year_id"]
+
+            def on_verified(result, err):
+                if err or not result:
+                    self._log("⚠️ 教学平台缓存已显示，但后台登录态校验失败；查询签到码前可能需要重新登录。")
+                    return
+                cookie, s_id, y_id = result
+                self._set_lnt_cookie(cookie)
+                self._log("✅ 后台登录态校验通过。")
+                self._refresh_courses_background(s_id, y_id)
+                self._warm_lnt_session()
+
+            run_sync_in_thread(verify_cached_login, on_verified)
+            return
         self._start_login()
+
+    def _refresh_courses_background(self, s_id=None, y_id=None):
+        if not self._cookie or not self._student_id:
+            return
+
+        def fetch_courses():
+            semester_id, academic_year_id = s_id, y_id
+            if not semester_id or not academic_year_id:
+                semester_id, academic_year_id = get_current_semester_info(self._cookie, self._log)
+            courses = get_courses(self._cookie, semester_id, academic_year_id, self._log)
+            return semester_id, academic_year_id, courses
+
+        def on_refreshed(result, err):
+            if err or not result:
+                self._log(f"⚠️ 后台刷新课程失败: {err}")
+                return
+            semester_id, academic_year_id, courses = result
+            if not courses:
+                return
+            self._courses = courses
+            update_lnt_session_cache(
+                self._student_id,
+                semester_id,
+                academic_year_id,
+                courses,
+                self._log,
+                self._cookie,
+            )
+            self._log(f"✅ 后台课程缓存已刷新：{len(courses)} 门。")
+
+        run_sync_in_thread(fetch_courses, on_refreshed)
+
+    def _manual_refresh_courses(self):
+        if self._busy:
+            return
+        if not self._cookie or not self._student_id:
+            self._set_home_status("请先进入教学平台完成登录", WARN)
+            return
+        self._busy = True
+        self._set_home_status("正在刷新课程列表...")
+        self._log("🔄 正在手动刷新课程列表...")
+
+        def fetch_courses():
+            s_id, y_id = get_current_semester_info(self._cookie, self._log)
+            courses = get_courses(self._cookie, s_id, y_id, self._log)
+            return s_id, y_id, courses
+
+        def on_courses(result, err):
+            self._busy = False
+            if err or not result:
+                self._log(f"❌ 课程刷新失败: {err}")
+                self._set_home_status("课程刷新失败", DANGER)
+                return
+            s_id, y_id, courses = result
+            if not courses:
+                self._log("❌ 课程刷新失败: 未返回课程")
+                self._set_home_status("课程刷新失败", DANGER)
+                return
+            self._courses = courses
+            self._monitor_seen.clear()
+            update_lnt_session_cache(self._student_id, s_id, y_id, courses, self._log, self._cookie)
+            self._set_home_status("课程列表已刷新", SUCCESS)
+            self.after(0, self._show_courses)
+
+        run_sync_in_thread(fetch_courses, on_courses)
     # ── 第1步：启动登录流程 ──────────────────────────────
     def _start_login(self):
         self._busy = True
@@ -2504,7 +2870,7 @@ class ZakoApp(ctk.CTk):
                 self._set_home_status("❌ 未能获取凭证，再试一次喵~", DANGER)
                 return
 
-            self._cookie     = cookie
+            self._set_lnt_cookie(cookie)
             self._student_id = student_id
             self._set_home_status("✅ 凭证就绪！正在拉取课程喵~", SUCCESS)
             self._log("✅ 凭证获取成功，开始拉取课程列表...")
@@ -2512,17 +2878,25 @@ class ZakoApp(ctk.CTk):
             # 第2步：拉取学期信息 + 课程列表（同步，放子线程）
             def fetch_courses():
                 s_id, y_id = get_current_semester_info(cookie, self._log)
-                return get_courses(cookie, s_id, y_id, self._log)
+                courses = get_courses(cookie, s_id, y_id, self._log)
+                return s_id, y_id, courses
 
-            def on_courses(courses, err2):
+            def on_courses(result, err2):
                 self._busy = False
-                if err2 or not courses:
+                if err2 or not result:
                     self._log(f"❌ 课程拉取失败: {err2}")
+                    self._set_home_status("❌ 课程列表拉取失败喵哦~", DANGER)
+                    return
+                s_id, y_id, courses = result
+                if not courses:
+                    self._log("❌ 课程拉取失败: 未返回课程")
                     self._set_home_status("❌ 课程列表拉取失败喵哦~", DANGER)
                     return
                 self._courses = courses
                 self._monitor_seen.clear()
+                update_lnt_session_cache(student_id, s_id, y_id, courses, self._log, cookie)
                 self.after(0, self._show_courses)   # 切换到课程页（主线程）
+                self._warm_lnt_session()
 
             run_sync_in_thread(fetch_courses, on_courses)
 
@@ -2720,7 +3094,7 @@ class ZakoApp(ctk.CTk):
                             if not number_code:
                                 self._log(f"[monitor] 跳过疑似数字签到：{course_name} 没有返回 number_code。")
                                 continue
-                            if status and not is_number_rollcall_active(status):
+                            if is_number_rollcall_finished(status):
                                 self._log(f"[monitor] 跳过数字签到：{course_name} 当前状态为 {status}。")
                                 continue
 
@@ -2796,6 +3170,12 @@ class ZakoApp(ctk.CTk):
             fg_color=ACCENT, hover_color=ACCENT_DK, text_color=BG,
             font=("Microsoft YaHei", 12, "bold"), corner_radius=8,
             command=self._show_lnt_tools,
+        ).pack(anchor="w", pady=(0, 10))
+        ctk.CTkButton(
+            hdr, text="刷新课程", width=92, height=28,
+            fg_color=SURFACE2, hover_color=SURFACE, text_color=TEXT_SEC,
+            font=("Microsoft YaHei", 12), corner_radius=8,
+            command=self._manual_refresh_courses,
         ).pack(anchor="w", pady=(0, 10))
         # ↑↑↑ 插入结束 ↑↑↑
 
@@ -3209,27 +3589,21 @@ class ZakoApp(ctk.CTk):
 
         # 后台拉取签到码
         def fetch():
-            r_id, r_time = get_latest_rollcall_id(
-                course_id, self._cookie, self._student_id
-            )
-            if not r_id:
-                return None
-            number_code, status, _ = get_number_code(r_id, self._cookie)
-            try:
-                dt = datetime.fromisoformat(r_time.replace("Z", "+00:00"))
-                time_str = dt.astimezone(timezone(timedelta(hours=8))).strftime(
-                    "%Y-%m-%d %H:%M"
-                )
-            except Exception:
-                time_str = str(r_time)
-            return {"code": number_code, "status": status, "time": time_str, "rid": r_id}
+            session = self._lnt_session or make_lnt_session(self._cookie)
+            self._lnt_session = session
+            if self._lnt_session_lock.acquire(blocking=False):
+                try:
+                    return get_latest_rollcall_result(course_id, self._cookie, self._student_id, session=session)
+                finally:
+                    self._lnt_session_lock.release()
+            return get_latest_rollcall_result(course_id, self._cookie, self._student_id)
 
         def on_result(result, err):
             if request_id != getattr(self, "_current_code_request", None):
                 return
             if err:
                 self._log(f"❌ 查询出错: {err}")
-                self.after(0, self._show_result_card, None, course_id, course_name)
+                self.after(0, self._show_result_card, {"error": str(err)}, course_id, course_name)
                 return
             self._log(
                 f"✅ {course_name} | {result['time'] if result else '-'} "
@@ -3248,7 +3622,7 @@ class ZakoApp(ctk.CTk):
             card, text="🔍", font=("Segoe UI Emoji", 48)
         ).place(relx=0.5, rely=0.4, anchor="center")
         ctk.CTkLabel(
-            card, text="正在查询签到码喵~",
+            card, text="正在实时查询签到码喵~",
             font=("Microsoft YaHei", 14), text_color=TEXT_SEC
         ).place(relx=0.5, rely=0.56, anchor="center")
         ctk.CTkProgressBar(
@@ -3270,9 +3644,23 @@ class ZakoApp(ctk.CTk):
         inner = ctk.CTkFrame(card, fg_color="transparent")
         inner.place(relx=0.5, rely=0.5, anchor="center")
 
-        rollcall_id = result["rid"] if result else None
+        rollcall_id = result.get("rid") if isinstance(result, dict) else None
 
-        if result is None:
+        if isinstance(result, dict) and result.get("error"):
+            error_text = result.get("error") or "查询失败"
+            login_expired = "登录状态" in error_text or "401" in error_text or "403" in error_text
+            ctk.CTkLabel(inner, text="!", font=("Microsoft YaHei", 52, "bold"), text_color=DANGER).pack()
+            make_label(
+                inner,
+                "教学平台登录已失效" if login_expired else "查询失败",
+                size=18,
+                bold=True,
+                color=DANGER,
+                anchor="center",
+            ).pack(pady=(8, 2))
+            make_label(inner, error_text, size=12, color=TEXT_SEC, anchor="center", wraplength=440).pack()
+
+        elif result is None:
             ctk.CTkLabel(inner, text="😿", font=("Segoe UI Emoji", 52)).pack()
             make_label(inner, "暂无签到记录", size=18, bold=True, anchor="center").pack(pady=(8,2))
             make_label(inner, "这门课还没有签到喵~", size=13, color=TEXT_SEC, anchor="center").pack()
@@ -3338,20 +3726,32 @@ class ZakoApp(ctk.CTk):
             width=180, height=38
         ).pack(side="left", padx=(20, 6))
 
-        if rollcall_id:
+        if isinstance(result, dict) and result.get("error") and (
+            "登录状态" in result.get("error", "") or "401" in result.get("error", "") or "403" in result.get("error", "")
+        ):
+            make_button(
+                btn_frame, "重新登录教学平台",
+                command=self._start_login,
+                fg=WARN,
+                hover="#E6B84E",
+                width=180,
+                height=38,
+            ).pack(side="right", padx=(6, 20))
+
+        if rollcall_id and (not result or result.get("is_radar") or not result.get("is_number")):
             make_button(
                 btn_frame, "雷达签到",
                 command=lambda: self._show_radar_page(rollcall_id, course_id, course_name),
                 fg=SUCCESS, hover="#04B888",
                 width=120, height=38
             ).pack(side="right", padx=6)
-            if result and result.get("code") and is_number_rollcall_active(result.get("status")):
-                make_button(
-                    btn_frame, "数字签到",
-                    command=lambda: self._submit_number_rollcall(course_name, rollcall_id, result.get("code")),
-                    fg=SUCCESS, hover="#04B888",
-                    width=120, height=38
-                ).pack(side="right", padx=6)
+        if rollcall_id and result and result.get("code") and is_number_rollcall_active(result.get("status")):
+            make_button(
+                btn_frame, "数字签到",
+                command=lambda: self._submit_number_rollcall(course_name, rollcall_id, result.get("code")),
+                fg=SUCCESS, hover="#04B888",
+                width=120, height=38
+            ).pack(side="right", padx=6)
     # =======================================================
     # 雷达签到页面
     # =======================================================

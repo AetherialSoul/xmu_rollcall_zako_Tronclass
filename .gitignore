@@ -12,6 +12,7 @@ browser_profile/
 # Local credentials and runtime configs
 account.local.json
 custom_radar_locations.json
+lnt_session_cache.json
 config.yaml
 scores.yaml
 Cookie.txt

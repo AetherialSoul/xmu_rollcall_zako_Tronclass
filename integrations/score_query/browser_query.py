@@ -350,9 +350,12 @@ def ensure_logged_in(page, config, login_state):
     print(f"浏览器已进入教务页面：{page.url}", flush=True)
 
 
-def force_relogin(page, config, login_state):
-    print("接口返回 401/403，清理 XMU 登录状态后重新登录。", flush=True)
-    page.context.clear_cookies()
+def recover_login(page, config, login_state, reason):
+    print(f"{reason}，清理 XMU 登录状态后重新登录。", flush=True)
+    try:
+        page.context.clear_cookies()
+    except Exception as exc:
+        print(f"清理浏览器 Cookie 失败，继续尝试重新登录：{exc}", flush=True)
     login_state["auto_login_used"] = False
     ensure_logged_in(page, config, login_state)
 
@@ -569,15 +572,15 @@ def main():
                     run_query_cycle(page, config, saved_scores)
                     time.sleep(config["interval"] * 60)
                 except BrowserLoginRequired:
-                    notify("登录状态失效", "成绩查询浏览器登录状态失效，请在打开的浏览器中重新登录。")
-                    ensure_logged_in(page, config, login_state)
+                    notify("登录状态失效", "成绩查询浏览器登录状态失效，正在尝试自动重新登录；如失败请在打开的浏览器中手动完成登录。")
+                    recover_login(page, config, login_state, "成绩查询浏览器登录状态失效")
                 except KeyboardInterrupt:
                     raise
                 except QueryHttpError as exc:
                     if exc.status in (401, 403):
                         print("学业完成进度接口返回 401/403，程序正在清理登录状态并重新登录。", flush=True)
                         try:
-                            force_relogin(page, config, login_state)
+                            recover_login(page, config, login_state, "学业完成进度接口返回 401/403")
                         except Exception:
                             traceback.print_exc()
                             notify(
@@ -591,8 +594,8 @@ def main():
                                 run_query_cycle(page, config, saved_scores)
                                 time.sleep(config["interval"] * 60)
                             except BrowserLoginRequired:
-                                notify("登录状态失效", "成绩查询浏览器登录状态失效，请在打开的浏览器中重新登录。")
-                                ensure_logged_in(page, config, login_state)
+                                notify("登录状态失效", "成绩查询浏览器登录状态失效，正在尝试自动重新登录；如失败请在打开的浏览器中手动完成登录。")
+                                recover_login(page, config, login_state, "自动重新登录后查询时登录状态再次失效")
                             except Exception:
                                 traceback.print_exc()
                                 notify("成绩查询异常", "自动重新登录后立即补查失败；程序继续运行，10 分钟后重试。")
@@ -609,6 +612,9 @@ def main():
                     traceback.print_exc()
                     notify("成绩查询异常", "成绩查询接口返回异常；程序继续运行，10 分钟后重试。")
                     time.sleep(config["interval"] * 60)
+    except Exception:
+        traceback.print_exc()
+        raise
     finally:
         if context is not None:
             try:
