@@ -49,6 +49,7 @@ WARN      = "#FFD166"
 DANGER    = "#EF476F"
 
 BASE_URL = "https://lnt.xmu.edu.cn"
+LNT_USER_COURSES_URL = f"{BASE_URL}/user/courses"
 APP_DIR = Path(__file__).resolve().parent
 LOGIN_STATE_DIR = APP_DIR / ".zako_browser_profile"
 CUSTOM_RADAR_LOCATIONS_FILE = APP_DIR / "custom_radar_locations.json"
@@ -622,6 +623,36 @@ def build_ids_username_login_url(current_url, fallback_service=BASE_URL):
     return f"{IDS_USERNAME_LOGIN_URL}&service={urlparse.quote(service, safe='')}"
 
 
+async def wait_for_url_settle(page, timeout=8, stable=0.6):
+    deadline = time.monotonic() + timeout
+    last_url = page.url
+    stable_since = time.monotonic()
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
+        current = page.url
+        if current != last_url:
+            last_url = current
+            stable_since = time.monotonic()
+        elif time.monotonic() - stable_since >= stable:
+            return current
+    return page.url
+
+
+async def open_mainland_identity_provider(page, log=print):
+    if "c-identity.xmu.edu.cn" not in page.url:
+        return False
+    link = page.locator('a[href*="/broker/cas-client/login"]').first
+    try:
+        if await link.count() and await link.is_visible(timeout=2000):
+            log("🔐 正在切换到厦大本部统一身份认证入口。")
+            await link.evaluate("el => el.click()")
+            await wait_for_url_settle(page, timeout=10)
+            return True
+    except Exception as exc:
+        log(f"⚠️ 切换本部统一认证入口失败，请在页面点击“统一身份认证登录”：{exc}")
+    return False
+
+
 async def auto_login_cas_page(page, log=print):
     account = load_account_config(log)
     if not account:
@@ -806,18 +837,35 @@ async def login_and_get_cookie(log=print, login_method=None):
                     log(f"✅ 找到主人真实学生ID了喵❤：{student_id}")
 
         page.on("request", handle_request)
-        await page.goto(BASE_URL, wait_until="commit", timeout=8000)
+        log(f"🔐 正在打开课程页登录入口：{LNT_USER_COURSES_URL}")
+        try:
+            await page.goto(LNT_USER_COURSES_URL, wait_until="commit", timeout=12000)
+        except Exception as exc:
+            msg = str(exc)
+            if any(token in msg for token in ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET", "ERR_TIMED_OUT")):
+                log("❌ 无法打开教学平台统一认证入口。当前机器到 ids.xmu.edu.cn 的连接被关闭/超时，请先确认校园网、厦大 VPN 或代理设置。")
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                return None, None
+            raise
+        await wait_for_url_settle(page, timeout=8)
 
-        if "ids.xmu.edu.cn" in page.url:
+        if any(host in page.url for host in ("ids.xmu.edu.cn", "c-identity.xmu.edu.cn", "cas.xmu.edu.my")):
             login_method = normalize_login_method(login_method or get_login_method())
             if login_method == "account":
-                await page.goto(build_ids_username_login_url(page.url, BASE_URL), wait_until="commit", timeout=8000)
+                if "c-identity.xmu.edu.cn" in page.url:
+                    await open_mainland_identity_provider(page, log)
+                if "ids.xmu.edu.cn" in page.url:
+                    await page.goto(build_ids_username_login_url(page.url, page.url), wait_until="commit", timeout=8000)
+                    await wait_for_url_settle(page, timeout=3)
                 await auto_login_cas_page(page, log)
                 log("👉 已尝试账号密码自动登录；如未自动跳转，请在浏览器中手动完成统一认证。")
             else:
                 log("👉 请在浏览器中输入账号密码登录，登录成功后脚本才自动继续喵~❤")
             await page.wait_for_function(
-                "() => !window.location.href.includes('ids.xmu.edu.cn')",
+                "() => !window.location.href.includes('ids.xmu.edu.cn') && !window.location.href.includes('c-identity.xmu.edu.cn') && !window.location.href.includes('cas.xmu.edu.my')",
                 timeout=120000,
             )
             log("✅ 登录成功喵❤！等待页面跳转喵❤！")

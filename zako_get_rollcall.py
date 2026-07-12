@@ -1,11 +1,15 @@
 import asyncio
 import re
+import time
 import requests
 from playwright.async_api import async_playwright
 from pathlib import Path
+from urllib import parse as urlparse
 
 BASE_URL = "https://lnt.xmu.edu.cn"
+LNT_USER_COURSES_URL = f"{BASE_URL}/user/courses"
 LOGIN_STATE_DIR = Path(__file__).resolve().parent / ".zako_browser_profile"
+IDS_USERNAME_LOGIN_URL = "https://ids.xmu.edu.cn/authserver/login?type=userNameLogin"
 
 HEADERS_BASE = {
     "accept": "application/json, text/plain, */*",
@@ -32,6 +36,47 @@ def get_current_semester_info(cookie):
     return "29", "12"
 
 # ==========================================
+
+def build_ids_username_login_url(current_url, fallback_service=BASE_URL):
+    service = fallback_service
+    try:
+        query = urlparse.parse_qs(urlparse.urlparse(str(current_url)).query)
+        service = query.get("service", [fallback_service])[0] or fallback_service
+    except Exception:
+        pass
+    return f"{IDS_USERNAME_LOGIN_URL}&service={urlparse.quote(service, safe='')}"
+
+
+async def wait_for_url_settle(page, timeout=8, stable=0.6):
+    deadline = time.monotonic() + timeout
+    last_url = page.url
+    stable_since = time.monotonic()
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
+        current = page.url
+        if current != last_url:
+            last_url = current
+            stable_since = time.monotonic()
+        elif time.monotonic() - stable_since >= stable:
+            return current
+    return page.url
+
+
+async def open_mainland_identity_provider(page):
+    if "c-identity.xmu.edu.cn" not in page.url:
+        return False
+    link = page.locator('a[href*="/broker/cas-client/login"]').first
+    try:
+        if await link.count() and await link.is_visible(timeout=2000):
+            print("🔐 正在切换到厦大本部统一身份认证入口。")
+            await link.evaluate("el => el.click()")
+            await wait_for_url_settle(page, timeout=10)
+            return True
+    except Exception as exc:
+        print(f"⚠️ 切换本部统一认证入口失败，请在页面点击“统一身份认证登录”：{exc}")
+    return False
+
+
 
 async def login_and_get_cookie():
     print("❤正在打开浏览器喵❤，连接厦大CAS畅课登录系统喵❤")
@@ -74,13 +119,31 @@ async def login_and_get_cookie():
 
         page.on("request", handle_request)
 
-        # 2. 直接访问主页
-        await page.goto(BASE_URL)
+        # 2. 从课程页触发登录，保留正确的畅课 service。
+        print(f"🔐 正在打开课程页登录入口：{LNT_USER_COURSES_URL}")
+        try:
+            await page.goto(LNT_USER_COURSES_URL, wait_until="commit", timeout=12000)
+        except Exception as exc:
+            msg = str(exc)
+            if any(token in msg for token in ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET", "ERR_TIMED_OUT")):
+                print("❌ 无法打开教学平台统一认证入口。当前机器到 ids.xmu.edu.cn 的连接被关闭/超时，请先确认校园网、厦大 VPN 或代理设置。")
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                return "", None
+            raise
+        await wait_for_url_settle(page, timeout=8)
 
-        if "ids.xmu.edu.cn" in page.url:
+        if any(host in page.url for host in ("ids.xmu.edu.cn", "c-identity.xmu.edu.cn", "cas.xmu.edu.my")):
+            if "c-identity.xmu.edu.cn" in page.url:
+                await open_mainland_identity_provider(page)
+            if "ids.xmu.edu.cn" in page.url:
+                await page.goto(build_ids_username_login_url(page.url, page.url), wait_until="commit", timeout=8000)
+                await wait_for_url_settle(page, timeout=3)
             print("👉 请在浏览器中输入账号密码登录，登录成功后脚本才自动继续喵~❤")
             await page.wait_for_function(
-                "() => !window.location.href.includes('ids.xmu.edu.cn')",
+                "() => !window.location.href.includes('ids.xmu.edu.cn') && !window.location.href.includes('c-identity.xmu.edu.cn') && !window.location.href.includes('cas.xmu.edu.my')",
                 timeout=120000
             )
             print("✅ 登录成功喵❤！等待页面跳转喵❤！")
