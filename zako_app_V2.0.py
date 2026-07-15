@@ -2057,8 +2057,8 @@ def parse_radar_failure(resp):
 
 
 
-def send_radar_rollcall(rollcall_id, cookie, latitude, longitude, log=print, location_name=None, custom_locations=None):
-    """向畅课平台发送雷达（GPS）签到请求。只提交调用方已确认的单个现场坐标。"""
+def _radar_submit_once(rollcall_id, cookie, latitude, longitude, log=print):
+    """提交一次雷达坐标，返回 (ok, detail_or_none, error_message_or_none)。"""
     url = f"{BASE_URL}/api/rollcall/{rollcall_id}/answer?api_version=1.76"
     headers = {
         "user-agent": (
@@ -2069,41 +2069,341 @@ def send_radar_rollcall(rollcall_id, cookie, latitude, longitude, log=print, loc
         "content-type": "application/json",
         "cookie": cookie,
     }
+    lat_v = float(latitude)
+    lng_v = float(longitude)
+    payload = {
+        "accuracy": 35,
+        "altitude": 0,
+        "altitudeAccuracy": None,
+        "deviceId": str(uuid.uuid1()),
+        "heading": None,
+        "latitude": lat_v,
+        "longitude": lng_v,
+        "speed": None,
+    }
+    resp = requests.put(url, json=payload, headers=headers, timeout=10)
+    if resp.status_code == 200:
+        return True, {"latitude": lat_v, "longitude": lng_v, "distance": 0}, None
+    detail = parse_radar_failure_detail(resp)
+    detail["latitude"] = lat_v
+    detail["longitude"] = lng_v
+    return False, detail, format_radar_failure_detail(detail)
 
-    def _build_payload(lat, lng):
-        return {
-            "accuracy": 35,
-            "altitude": 0,
-            "altitudeAccuracy": None,
-            "deviceId": str(uuid.uuid1()),
-            "heading": None,
-            "latitude": lat,
-            "longitude": lng,
-            "speed": None,
-        }
 
+def _radar_local_xy(lat0, lng0, lat, lng):
+    """以 (lat0,lng0) 为原点，返回 (east_m, north_m)。"""
+    radius = 6371000.0
+    lat0_r = math.radians(float(lat0))
+    east = math.radians(float(lng) - float(lng0)) * radius * math.cos(lat0_r)
+    north = math.radians(float(lat) - float(lat0)) * radius
+    return east, north
+
+
+def _radar_from_local_xy(lat0, lng0, east_m, north_m):
+    return shift_radar_coordinate(lat0, lng0, north_meters=north_m, east_meters=east_m)
+
+
+def _radar_circle_intersections(p1, r1, p2, r2):
+    """两圆交点，局部平面坐标。返回 0~2 个 (x,y)。"""
+    x1, y1 = p1
+    x2, y2 = p2
+    dx = x2 - x1
+    dy = y2 - y1
+    d = math.hypot(dx, dy)
+    if d < 1e-6:
+        return []
+    # 无交 / 包含
+    if d > r1 + r2 or d < abs(r1 - r2):
+        # 放宽：取连线上按半径比例的最近点
+        if d > 0:
+            t = r1 / (r1 + r2) if (r1 + r2) > 0 else 0.5
+            if d > r1 + r2:
+                t = r1 / d
+            elif d < abs(r1 - r2):
+                t = 1.0 if r1 > r2 else -1.0
+                t = (r1 * t) / d if d else 0
+            return [(x1 + t * dx, y1 + t * dy)]
+        return []
+    a = (r1 * r1 - r2 * r2 + d * d) / (2 * d)
+    h_sq = max(r1 * r1 - a * a, 0.0)
+    h = math.sqrt(h_sq)
+    xm = x1 + a * dx / d
+    ym = y1 + a * dy / d
+    if h < 1e-6:
+        return [(xm, ym)]
+    rx = -dy * (h / d)
+    ry = dx * (h / d)
+    return [(xm + rx, ym + ry), (xm - rx, ym - ry)]
+
+
+def _radar_trilaterate_target(samples):
+    """用 2~3 个 (lat,lng,distance) 样本反推目标点。
+
+    samples: list[(lat, lng, distance_m)]
+    返回 list[(lat, lng, label)]，按可信度大致排序。
+    """
+    if len(samples) < 2:
+        return []
+
+    lat0, lng0, _ = samples[0]
+    local = []
+    for lat, lng, dist in samples:
+        try:
+            x, y = _radar_local_xy(lat0, lng0, lat, lng)
+            r = float(dist)
+        except (TypeError, ValueError):
+            continue
+        if r < 0:
+            continue
+        local.append((x, y, r, float(lat), float(lng)))
+    if len(local) < 2:
+        return []
+
+    results = []
+    seen = set()
+
+    def _push(x, y, label):
+        lat, lng = _radar_from_local_xy(lat0, lng0, x, y)
+        key = (round(lat, 7), round(lng, 7))
+        if key in seen:
+            return
+        seen.add(key)
+        # 残差：与各样本距离之差
+        residual = 0.0
+        for sx, sy, sr, _la, _ln in local:
+            residual += abs(math.hypot(x - sx, y - sy) - sr)
+        results.append((residual, lat, lng, label))
+
+    # 先用前两点得到交点候选
+    p1 = (local[0][0], local[0][1])
+    r1 = local[0][2]
+    p2 = (local[1][0], local[1][1])
+    r2 = local[1][2]
+    inters = _radar_circle_intersections(p1, r1, p2, r2)
+
+    if len(local) >= 3:
+        p3 = (local[2][0], local[2][1])
+        r3 = local[2][2]
+        if inters:
+            # 用第三圆距离挑选更优交点
+            inters_sorted = sorted(
+                inters,
+                key=lambda pt: abs(math.hypot(pt[0] - p3[0], pt[1] - p3[1]) - r3),
+            )
+            best = inters_sorted[0]
+            _push(best[0], best[1], "三点测距推算点")
+            if len(inters_sorted) > 1:
+                alt = inters_sorted[1]
+                _push(alt[0], alt[1], "三点测距备选交点")
+        # 三对圆两两求交，再按第三圆筛选，提高稳健性
+        pairs = ((0, 1, 2), (0, 2, 1), (1, 2, 0))
+        for i, j, k in pairs:
+            pi = (local[i][0], local[i][1])
+            pj = (local[j][0], local[j][1])
+            pk = (local[k][0], local[k][1])
+            ri, rj, rk = local[i][2], local[j][2], local[k][2]
+            for pt in _radar_circle_intersections(pi, ri, pj, rj):
+                err = abs(math.hypot(pt[0] - pk[0], pt[1] - pk[1]) - rk)
+                _push(pt[0], pt[1], f"圆{i+1}&{j+1}交点(第三圆误差{err:.1f}m)")
+
+        # 线性最小二乘 trilateration（三圆不一致时的折中解）
+        try:
+            # 以点1为参考线性化
+            x1, y1, rr1 = local[0][0], local[0][1], local[0][2]
+            A = []
+            b = []
+            for sx, sy, sr, _la, _ln in local[1:]:
+                A.append([2 * (sx - x1), 2 * (sy - y1)])
+                b.append(rr1 * rr1 - sr * sr - x1 * x1 + sx * sx - y1 * y1 + sy * sy)
+            if len(A) >= 2:
+                # 2x2 正规方程
+                a11 = A[0][0] * A[0][0] + A[1][0] * A[1][0]
+                a12 = A[0][0] * A[0][1] + A[1][0] * A[1][1]
+                a22 = A[0][1] * A[0][1] + A[1][1] * A[1][1]
+                b1 = A[0][0] * b[0] + A[1][0] * b[1]
+                b2 = A[0][1] * b[0] + A[1][1] * b[1]
+                det = a11 * a22 - a12 * a12
+                if abs(det) > 1e-9:
+                    x = (b1 * a22 - b2 * a12) / det
+                    y = (a11 * b2 - a12 * b1) / det
+                    _push(x, y, "三点最小二乘解")
+        except Exception:
+            pass
+    else:
+        for idx, pt in enumerate(inters):
+            label = "两点交点A" if idx == 0 else "两点交点B"
+            _push(pt[0], pt[1], label)
+
+    results.sort(key=lambda item: item[0])
+    return [(lat, lng, label) for _res, lat, lng, label in results]
+
+
+def _radar_probe_offsets(distance):
+    """根据首次距离选探测基线，返回两个正交偏移 (north_m, east_m, label)。"""
+    try:
+        d = float(distance)
+    except (TypeError, ValueError):
+        d = 80.0
+    # 基线略小于距离，保证几何可观测且不过分远离签到区
+    baseline = max(35.0, min(d * 0.75 if d > 0 else 80.0, 160.0))
+    return (
+        (0.0, baseline, f"探测点东偏 {baseline:.0f}m"),
+        (baseline, 0.0, f"探测点北偏 {baseline:.0f}m"),
+    )
+
+
+def send_radar_rollcall(
+    rollcall_id,
+    cookie,
+    latitude,
+    longitude,
+    log=print,
+    location_name=None,
+    custom_locations=None,
+    auto_adjust=False,
+    max_adjust_attempts=8,
+):
+    """向畅课平台发送雷达（GPS）签到请求。
+
+    auto_adjust=True 时：
+      1) 先提交默认点拿到距离 d1
+      2) 再主动提交两个探测点拿到 d2/d3
+      3) 用三点距离反推目标坐标后提交
+    """
     try:
         lat_v = float(latitude)
         lng_v = float(longitude)
-        resp = requests.put(url, json=_build_payload(lat_v, lng_v), headers=headers, timeout=10)
-        if resp.status_code == 200:
+    except (TypeError, ValueError) as exc:
+        msg = f"无效坐标: {exc}"
+        log(f"❌ 雷达签到失败：{msg}")
+        return False, msg
+
+    try:
+        ok, detail, msg = _radar_submit_once(rollcall_id, cookie, lat_v, lng_v, log)
+        if ok:
             log(f"✅ 雷达签到成功喵❤！位置 ({lat_v}, {lng_v})")
             return True, None
 
-        detail = parse_radar_failure_detail(resp)
-        d1 = detail.get("distance")
-        msg = format_radar_failure_detail(detail)
+        if not auto_adjust:
+            advice = build_radar_location_advice(
+                lat_v,
+                lng_v,
+                custom_locations or {},
+                location_name=location_name,
+                server_distance=(detail or {}).get("distance"),
+            )
+            full = msg or "雷达签到失败"
+            if advice:
+                full = f"{full}\n{advice}"
+            log(f"❌ 雷达签到失败：{full}")
+            return False, full
+
+        d1 = (detail or {}).get("distance")
+        last_msg = msg or "雷达签到失败"
+        samples = []
+        if d1 is not None:
+            samples.append((lat_v, lng_v, float(d1)))
+
+        log(
+            f"📡 雷达首次未过，开始三点测距推算"
+            f"（起点: {location_name or f'{lat_v:.6f},{lng_v:.6f}'}"
+            f"{'' if d1 is None else f'，距离约 {format_radar_distance(d1)}'}）"
+        )
+
+        # 主动再提交两个探测点
+        for north_m, east_m, probe_label in _radar_probe_offsets(d1):
+            probe_lat, probe_lng = shift_radar_coordinate(
+                lat_v, lng_v, north_meters=north_m, east_meters=east_m
+            )
+            log(f"📍 {probe_label} -> ({probe_lat:.6f}, {probe_lng:.6f})")
+            ok, detail, msg = _radar_submit_once(rollcall_id, cookie, probe_lat, probe_lng, log)
+            if ok:
+                log(f"✅ 雷达签到成功喵❤！探测点直接命中 ({probe_lat}, {probe_lng}) / {probe_label}")
+                return True, None
+            last_msg = msg or last_msg
+            dist = (detail or {}).get("distance")
+            if dist is not None:
+                samples.append((probe_lat, probe_lng, float(dist)))
+                log(f"   平台距离约 {format_radar_distance(dist)}")
+            else:
+                log("   平台未返回距离，该探测点无法参与推算")
+
+        if len(samples) < 2:
+            advice = build_radar_location_advice(
+                lat_v,
+                lng_v,
+                custom_locations or {},
+                location_name=location_name,
+                server_distance=d1,
+            )
+            full = last_msg or "雷达签到失败"
+            full = f"{full}；有效测距样本不足（{len(samples)}/3），无法三点推算"
+            if advice:
+                full = f"{full}\n{advice}"
+            log(f"❌ 雷达签到失败：{full}")
+            return False, full
+
+        targets = _radar_trilaterate_target(samples)
+        if not targets:
+            full = f"{last_msg}；三点距离无法解出目标坐标"
+            log(f"❌ 雷达签到失败：{full}")
+            return False, full
+
+        log(
+            f"🧮 已根据 {len(samples)} 个测距点推算目标，候选 {len(targets)} 个；"
+            f"优先提交残差最小点"
+        )
+
+        # 推算点提交；若仍失败且返回新距离，可把新点加入样本再解一次
+        tried = {(round(lat_v, 6), round(lng_v, 6))}
+        for s_lat, s_lng, _sd in samples:
+            tried.add((round(s_lat, 6), round(s_lng, 6)))
+
+        attempts = 0
+        best_lat, best_lng, best_dist = lat_v, lng_v, d1
+        pending = list(targets)
+
+        while pending and attempts < max_adjust_attempts:
+            next_lat, next_lng, label = pending.pop(0)
+            key = (round(next_lat, 6), round(next_lng, 6))
+            if key in tried:
+                continue
+            tried.add(key)
+            attempts += 1
+            log(f"🎯 提交推算坐标第 {attempts} 次：{label} -> ({next_lat:.6f}, {next_lng:.6f})")
+            ok, detail, msg = _radar_submit_once(rollcall_id, cookie, next_lat, next_lng, log)
+            if ok:
+                log(f"✅ 雷达签到成功喵❤！推算坐标 ({next_lat}, {next_lng}) / {label}")
+                return True, None
+            last_msg = msg or last_msg
+            dist = (detail or {}).get("distance")
+            if dist is not None:
+                log(f"   推算点仍偏差约 {format_radar_distance(dist)}")
+                if best_dist is None or dist < best_dist:
+                    best_lat, best_lng, best_dist = next_lat, next_lng, dist
+                # 用新样本刷新推算（最多一轮重解）
+                samples.append((next_lat, next_lng, float(dist)))
+                if len(samples) >= 3 and attempts < max_adjust_attempts:
+                    refined = _radar_trilaterate_target(samples[-3:])
+                    for r_lat, r_lng, r_label in refined[:3]:
+                        rkey = (round(r_lat, 6), round(r_lng, 6))
+                        if rkey not in tried:
+                            pending.append((r_lat, r_lng, f"重解/{r_label}"))
+
         advice = build_radar_location_advice(
-            lat_v,
-            lng_v,
+            best_lat,
+            best_lng,
             custom_locations or {},
             location_name=location_name,
-            server_distance=d1,
+            server_distance=best_dist,
         )
+        full = last_msg or "雷达签到失败"
+        if best_dist is not None:
+            full = f"{full}；三点推算后最近点距约 {format_radar_distance(best_dist)}"
         if advice:
-            msg = f"{msg}\n{advice}"
-        log(f"❌ 雷达签到失败：{msg}")
-        return False, msg
+            full = f"{full}\n{advice}"
+        log(f"❌ 雷达签到失败（三点测距推算已尝试 {attempts} 次）：{full}")
+        return False, full
     except Exception as e:
         log(f"❌ 雷达签到请求异常：{e}")
         return False, str(e)
@@ -3079,6 +3379,36 @@ class ZakoApp(ctk.CTk):
 
         run_sync_in_thread(_run, _done)
 
+    def _auto_submit_radar_rollcall(self, course_name, rollcall_id, latitude, longitude, location_name=None):
+        self._set_monitor_status(f"自动提交雷达签到：{course_name}", WARN)
+
+        def _run():
+            return send_radar_rollcall(
+                rollcall_id,
+                self._cookie,
+                latitude,
+                longitude,
+                self._log,
+                location_name,
+                self._custom_radar_locations,
+                auto_adjust=True,
+            )
+
+        def _done(result, err):
+            if err:
+                self._log(f"❌ 自动雷达签到异常: {err}")
+                self._set_monitor_status("自动雷达签到异常", DANGER)
+                return
+            ok, reason = result
+            if ok:
+                self._set_monitor_status(f"自动雷达签到已提交：{course_name}", SUCCESS)
+                self._log(f"✅ 自动雷达签到成功：{course_name} @ {location_name or f'{latitude},{longitude}'}")
+            else:
+                self._set_monitor_status(f"自动雷达签到失败：{reason}", DANGER)
+                self._log(f"❌ 自动雷达签到失败：{course_name} - {reason}")
+
+        run_sync_in_thread(_run, _done)
+
     def _prompt_radar_rollcall_confirmation(self, course_name, rollcall_id, course_id="-", event_time="待签到"):
         self._log(f"⚠️ 检测到雷达签到：{course_name}。雷达签到需要现场确认位置，已切换为手动确认。")
         self._set_monitor_status(f"雷达签到待现场确认：{course_name}", WARN)
@@ -3102,7 +3432,7 @@ class ZakoApp(ctk.CTk):
             return
 
         self._monitor_stop.clear()
-        mode_label = "数字自动 / 雷达确认" if self._auto_mode else "全部手动确认"
+        mode_label = "数字/雷达自动" if self._auto_mode else "全部手动确认"
         self._set_monitor_status(f"签到监听运行中（{mode_label}），每 30 秒检查一次", SUCCESS)
         self._log(f"[monitor] started: {mode_label} mode")
 
@@ -3167,17 +3497,35 @@ class ZakoApp(ctk.CTk):
                                 event.get("time") or "待签到",
                                 "雷达签到",
                             )
-                            self._prompt_radar_rollcall_confirmation(
-                                course_name,
-                                rollcall_id,
-                                course_id,
-                                event.get("time") or "待签到",
-                            )
+                            if self._auto_mode:
+                                default_loc = get_default_radar_location(self._custom_radar_locations)
+                                if default_loc:
+                                    loc_name, lat, lng = default_loc
+                                    self._auto_submit_radar_rollcall(
+                                        course_name, rollcall_id, lat, lng, loc_name
+                                    )
+                                else:
+                                    self._log(
+                                        f"⚠️ 自动雷达签到缺少默认位置：{course_name}。请在设置中配置默认雷达位置后重试。"
+                                    )
+                                    self._prompt_radar_rollcall_confirmation(
+                                        course_name,
+                                        rollcall_id,
+                                        course_id,
+                                        event.get("time") or "待签到",
+                                    )
+                            else:
+                                self._prompt_radar_rollcall_confirmation(
+                                    course_name,
+                                    rollcall_id,
+                                    course_id,
+                                    event.get("time") or "待签到",
+                                )
                         self._monitor_stop.wait(0.2)
 
                     if not self._monitor_stop.is_set():
                         stamp = datetime.now().strftime("%H:%M:%S")
-                        mode_tag = "数字自动" if self._auto_mode else "待确认"
+                        mode_tag = "自动提交" if self._auto_mode else "待确认"
                         self._set_monitor_status(
                             f"签到监听中 [{mode_tag}] | 数字: {number_count} | 雷达: {radar_count} | {stamp}", SUCCESS
                         )
@@ -3239,13 +3587,13 @@ class ZakoApp(ctk.CTk):
 
         def _toggle_auto_mode():
             self._auto_mode = not self._auto_mode
-            new_text = "🔁 数字自动" if self._auto_mode else "📋 手动确认"
+            new_text = "🔁 全自动" if self._auto_mode else "📋 手动确认"
             auto_btn.configure(text=new_text)
             auto_btn.configure(fg_color=ACCENT if self._auto_mode else SURFACE2)
-            status_text = "数字签到将自动提交，雷达签到仍需现场确认" if self._auto_mode else "数字和雷达签到都将手动确认"
+            status_text = "数字和雷达签到都将自动提交（雷达使用默认位置）" if self._auto_mode else "数字和雷达签到都将手动确认"
             if self._monitor_status_label:
                 self._monitor_status_label.configure(text=status_text)
-            self._log("[monitor] 数字自动 / 雷达确认模式" if self._auto_mode else "[monitor] 全部手动确认模式")
+            self._log("[monitor] 数字/雷达自动提交模式" if self._auto_mode else "[monitor] 全部手动确认模式")
 
         auto_btn = ctk.CTkButton(
             monitor_box, text="📋 手动确认", width=108, height=30,
@@ -3269,7 +3617,7 @@ class ZakoApp(ctk.CTk):
         ).pack(side="left", padx=4, pady=8)
         self._monitor_status_label = ctk.CTkLabel(
             monitor_box,
-            text="签到监听未启动。可切换数字自动提交；雷达始终需要现场确认。",
+            text="签到监听未启动。可切换数字/雷达自动提交（雷达需先设置默认位置）。",
             font=("Microsoft YaHei", 11), text_color=TEXT_SEC, anchor="w"
         )
         self._monitor_status_label.pack(side="left", fill="x", expand=True, padx=10)
