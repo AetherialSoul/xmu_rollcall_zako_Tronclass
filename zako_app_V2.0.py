@@ -2490,7 +2490,11 @@ class ZakoApp(ctk.CTk):
         self._busy       = False        # 防止重复点击
         self._monitor_thread = None
         self._monitor_stop = threading.Event()
+        self._monitor_lock = threading.Lock()
         self._monitor_seen = set()
+        self._monitor_pending = set()
+        self._monitor_auto_failures = {}
+        self._monitor_auto_retry_limit = 1
         self._monitor_interval = 30
         self._monitor_status_label = None
         self._score_process = None
@@ -3105,7 +3109,7 @@ class ZakoApp(ctk.CTk):
             self._set_lnt_cookie(cached.get("cookie") or "")
             self._student_id = cached["student_id"]
             self._courses = cached["courses"]
-            self._monitor_seen.clear()
+            self._reset_monitor_tracking()
             self._log("⚡ 已使用教学平台缓存直接进入课程页；后台校验登录态。")
             self._set_home_status("已使用教学平台缓存。", SUCCESS)
             self._show_courses()
@@ -3193,7 +3197,7 @@ class ZakoApp(ctk.CTk):
                 self._set_home_status("课程刷新失败", DANGER)
                 return
             self._courses = courses
-            self._monitor_seen.clear()
+            self._reset_monitor_tracking()
             update_lnt_session_cache(self._student_id, s_id, y_id, courses, self._log, self._cookie)
             self._set_home_status("课程列表已刷新", SUCCESS)
             self.after(0, self._show_courses)
@@ -3241,7 +3245,7 @@ class ZakoApp(ctk.CTk):
                     self._set_home_status("❌ 课程列表拉取失败喵哦~", DANGER)
                     return
                 self._courses = courses
-                self._monitor_seen.clear()
+                self._reset_monitor_tracking()
                 update_lnt_session_cache(student_id, s_id, y_id, courses, self._log, cookie)
                 self.after(0, self._show_courses)   # 切换到课程页（主线程）
                 self._warm_lnt_session()
@@ -3316,6 +3320,58 @@ class ZakoApp(ctk.CTk):
                 if ok:
                     self._show_radar_page(str(rollcall_id), event.get("course_id") or "-", course_name)
 
+    def _reset_monitor_tracking(self):
+        with self._monitor_lock:
+            self._monitor_seen.clear()
+            self._monitor_pending.clear()
+            self._monitor_auto_failures.clear()
+
+    def _is_monitor_event_tracked(self, key):
+        with self._monitor_lock:
+            return key in self._monitor_seen or key in self._monitor_pending
+
+    def _mark_monitor_seen(self, key):
+        if not key:
+            return
+        with self._monitor_lock:
+            self._monitor_pending.discard(key)
+            self._monitor_seen.add(key)
+            self._monitor_auto_failures.pop(key, None)
+
+    def _mark_monitor_pending(self, key):
+        if not key:
+            return False
+        with self._monitor_lock:
+            if key in self._monitor_seen or key in self._monitor_pending:
+                return False
+            self._monitor_pending.add(key)
+            return True
+
+    def _record_monitor_auto_failure(self, key):
+        if not key:
+            return 0, False
+        with self._monitor_lock:
+            self._monitor_pending.discard(key)
+            failures = self._monitor_auto_failures.get(key, 0) + 1
+            self._monitor_auto_failures[key] = failures
+            should_retry = failures <= self._monitor_auto_retry_limit
+            if not should_retry:
+                self._monitor_seen.add(key)
+                self._monitor_auto_failures.pop(key, None)
+            return failures, should_retry
+
+    def _handle_auto_rollcall_failure(self, key, event, kind_label, course_name, reason):
+        failures, should_retry = self._record_monitor_auto_failure(key)
+        if should_retry:
+            self._log(
+                f"[monitor] 自动{kind_label}失败，将在下一轮重试 "
+                f"({failures}/{self._monitor_auto_retry_limit})：{course_name} - {reason}"
+            )
+            return
+        self._log(f"[monitor] 自动{kind_label}连续失败 {failures} 次，回退手动确认：{course_name} - {reason}")
+        if event:
+            self._prompt_rollcall_confirmation(event)
+
     def _submit_number_rollcall(self, course_name, rollcall_id, number_code=None):
         self._set_monitor_status(f"正在提交数字签到：{course_name}", WARN)
 
@@ -3358,7 +3414,7 @@ class ZakoApp(ctk.CTk):
 
         run_sync_in_thread(_run, _done)
 
-    def _auto_submit_number_rollcall(self, course_name, rollcall_id, number_code=None):
+    def _auto_submit_number_rollcall(self, course_name, rollcall_id, number_code=None, monitor_key=None, event=None):
         self._set_monitor_status(f"自动提交数字签到：{course_name}", WARN)
 
         def _run():
@@ -3368,18 +3424,30 @@ class ZakoApp(ctk.CTk):
             if err:
                 self._log(f"❌ 自动数字签到异常: {err}")
                 self._set_monitor_status("自动数字签到异常", DANGER)
+                self._handle_auto_rollcall_failure(monitor_key, event, "数字签到", course_name, err)
                 return
             ok, reason = result
             if ok:
+                self._mark_monitor_seen(monitor_key)
                 self._set_monitor_status(f"自动数字签到已提交：{course_name}", SUCCESS)
                 self._log(f"✅ 自动数字签到成功：{course_name}")
             else:
                 self._set_monitor_status(f"自动数字签到失败：{reason}", DANGER)
                 self._log(f"❌ 自动数字签到失败：{course_name} - {reason}")
+                self._handle_auto_rollcall_failure(monitor_key, event, "数字签到", course_name, reason)
 
         run_sync_in_thread(_run, _done)
 
-    def _auto_submit_radar_rollcall(self, course_name, rollcall_id, latitude, longitude, location_name=None):
+    def _auto_submit_radar_rollcall(
+        self,
+        course_name,
+        rollcall_id,
+        latitude,
+        longitude,
+        location_name=None,
+        monitor_key=None,
+        event=None,
+    ):
         self._set_monitor_status(f"自动提交雷达签到：{course_name}", WARN)
 
         def _run():
@@ -3392,20 +3460,24 @@ class ZakoApp(ctk.CTk):
                 location_name,
                 self._custom_radar_locations,
                 auto_adjust=True,
+                max_adjust_attempts=3,
             )
 
         def _done(result, err):
             if err:
                 self._log(f"❌ 自动雷达签到异常: {err}")
                 self._set_monitor_status("自动雷达签到异常", DANGER)
+                self._handle_auto_rollcall_failure(monitor_key, event, "雷达签到", course_name, err)
                 return
             ok, reason = result
             if ok:
+                self._mark_monitor_seen(monitor_key)
                 self._set_monitor_status(f"自动雷达签到已提交：{course_name}", SUCCESS)
                 self._log(f"✅ 自动雷达签到成功：{course_name} @ {location_name or f'{latitude},{longitude}'}")
             else:
                 self._set_monitor_status(f"自动雷达签到失败：{reason}", DANGER)
                 self._log(f"❌ 自动雷达签到失败：{course_name} - {reason}")
+                self._handle_auto_rollcall_failure(monitor_key, event, "雷达签到", course_name, reason)
 
         run_sync_in_thread(_run, _done)
 
@@ -3460,7 +3532,7 @@ class ZakoApp(ctk.CTk):
                         else:
                             number_count += 1
 
-                        if key in self._monitor_seen:
+                        if self._is_monitor_event_tracked(key):
                             continue
 
                         if kind == "number":
@@ -3476,21 +3548,48 @@ class ZakoApp(ctk.CTk):
                                 self._log(f"[monitor] 跳过数字签到：{course_name} 当前状态为 {status}。")
                                 continue
 
-                            self._monitor_seen.add(key)
+                            number_event = {
+                                "kind": "number",
+                                "course_id": course_id,
+                                "course_name": course_name,
+                                "rollcall_id": rollcall_id,
+                                "number_code": number_code,
+                                "time": event.get("time"),
+                            }
+                            if self._auto_mode:
+                                if not self._mark_monitor_pending(key):
+                                    continue
+                            else:
+                                self._mark_monitor_seen(key)
                             self._notify_rollcall(course_name, number_code, event.get("time"), "数字签到")
                             if self._auto_mode:
-                                self._auto_submit_number_rollcall(course_name, rollcall_id, number_code)
+                                self._auto_submit_number_rollcall(
+                                    course_name,
+                                    rollcall_id,
+                                    number_code,
+                                    monitor_key=key,
+                                    event=number_event,
+                                )
                             else:
-                                self._prompt_rollcall_confirmation({
-                                    "kind": "number",
-                                    "course_id": course_id,
-                                    "course_name": course_name,
-                                    "rollcall_id": rollcall_id,
-                                    "number_code": number_code,
-                                    "time": event.get("time"),
-                                })
+                                self._prompt_rollcall_confirmation(number_event)
                         else:
-                            self._monitor_seen.add(key)
+                            radar_event = {
+                                "kind": "radar",
+                                "course_id": course_id,
+                                "course_name": course_name,
+                                "rollcall_id": rollcall_id,
+                                "time": event.get("time") or "待签到",
+                            }
+                            if self._auto_mode:
+                                default_loc = get_default_radar_location(self._custom_radar_locations)
+                                if default_loc:
+                                    if not self._mark_monitor_pending(key):
+                                        continue
+                                else:
+                                    self._mark_monitor_seen(key)
+                            else:
+                                default_loc = None
+                                self._mark_monitor_seen(key)
                             self._notify_rollcall(
                                 course_name,
                                 f"雷达点名 ID {rollcall_id}",
@@ -3498,28 +3597,27 @@ class ZakoApp(ctk.CTk):
                                 "雷达签到",
                             )
                             if self._auto_mode:
-                                default_loc = get_default_radar_location(self._custom_radar_locations)
                                 if default_loc:
                                     loc_name, lat, lng = default_loc
                                     self._auto_submit_radar_rollcall(
-                                        course_name, rollcall_id, lat, lng, loc_name
+                                        course_name,
+                                        rollcall_id,
+                                        lat,
+                                        lng,
+                                        loc_name,
+                                        monitor_key=key,
+                                        event=radar_event,
                                     )
                                 else:
                                     self._log(
                                         f"⚠️ 自动雷达签到缺少默认位置：{course_name}。请在设置中配置默认雷达位置后重试。"
                                     )
                                     self._prompt_radar_rollcall_confirmation(
-                                        course_name,
-                                        rollcall_id,
-                                        course_id,
-                                        event.get("time") or "待签到",
+                                        course_name, rollcall_id, course_id, radar_event["time"]
                                     )
                             else:
                                 self._prompt_radar_rollcall_confirmation(
-                                    course_name,
-                                    rollcall_id,
-                                    course_id,
-                                    event.get("time") or "待签到",
+                                    course_name, rollcall_id, course_id, radar_event["time"]
                                 )
                         self._monitor_stop.wait(0.2)
 
